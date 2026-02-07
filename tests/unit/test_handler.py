@@ -606,7 +606,7 @@ class TestEnforcement(unittest.TestCase):
 
 class TestThresholdLowBreach(unittest.TestCase):
     """
-    Option B: permanent test to simulate "lower threshold to 0.01"
+    Permanent test to simulate "lower threshold to 0.01"
     and confirm BREACH triggers SNS alert (successful publish).
     """
     @patch.dict(
@@ -615,10 +615,9 @@ class TestThresholdLowBreach(unittest.TestCase):
             "TABLE_NAME": "state-table",
             "COST_HISTORY_TABLE": "history-table",
             "ALERTS_TOPIC_ARN": "arn:aws:sns:us-east-1:123456789012:topic",
-            "THRESHOLD": "0.01",  # << lowered threshold
+            "THRESHOLD": "0.01",
             "ENABLE_DAILY_PK": "false",
             "ENABLE_MONTHLY_ROLLUP": "true",
-            # enforcement disabled for this test
             "ENFORCEMENT_ENABLED": "false",
         },
         clear=True,
@@ -656,17 +655,285 @@ class TestThresholdLowBreach(unittest.TestCase):
         self.assertTrue(res["ok"])
         self.assertEqual(res["status"], "BREACH")
 
-        # SNS breach alert should be published
         self.assertTrue(sns.publish.called)
-
-        # Confirm the BREACH subject was used at least once
         subjects = [c.kwargs.get("Subject") for c in sns.publish.call_args_list]
         self.assertIn("CostGuardian BREACH", subjects)
 
-        # Pending alert should NOT be written because publish succeeded
         pending_writes = [
             c.kwargs.get("Item", {}).get("key")
             for c in state_table.put_item.call_args_list
             if "Item" in c.kwargs
         ]
         self.assertNotIn("alert_pending", pending_writes)
+
+
+class TestOperationalSimulations(unittest.TestCase):
+    """
+    Management-style tests: cover safety guardrails and edge cases.
+    """
+
+    @patch.dict(
+        os.environ,
+        {
+            "TABLE_NAME": "state-table",
+            "COST_HISTORY_TABLE": "history-table",
+            "ALERTS_TOPIC_ARN": "arn:aws:sns:us-east-1:123456789012:topic",
+            "THRESHOLD": "0.10",
+            "ENABLE_DAILY_PK": "false",
+            "ENABLE_MONTHLY_ROLLUP": "true",
+        },
+        clear=True,
+    )
+    @patch("boto3.resource")
+    @patch("boto3.client")
+    def test_pending_retry_publish_fails_keeps_pending(self, mock_boto_client, mock_boto_resource):
+        """
+        If a pending alert exists and retry publish fails, we should NOT delete it,
+        and the run should continue.
+        """
+        state_table = MagicMock()
+        history_table = MagicMock()
+
+        state_table.get_item.return_value = {
+            "Item": {
+                "key": "alert_pending",
+                "topic_arn": "arn:aws:sns:us-east-1:123456789012:topic",
+                "subject": "CostGuardian BREACH",
+                "message": "pending message",
+            }
+        }
+
+        dynamodb = MagicMock()
+        dynamodb.Table.side_effect = lambda name: state_table if name == "state-table" else history_table
+        mock_boto_resource.return_value = dynamodb
+
+        ce = MagicMock()
+        sns = MagicMock()
+        sns.publish.side_effect = sns_client_error()
+
+        def client_factory(service, **kwargs):
+            return {"ce": ce, "sns": sns}[service]
+
+        mock_boto_client.side_effect = client_factory
+
+        # daily OK + monthly rollup
+        ce.get_cost_and_usage.side_effect = [
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.01", "Unit": "USD"}}}]},
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},
+        ]
+        history_table.put_item.return_value = None
+
+        res = handler({}, {})
+        self.assertTrue(res["ok"])
+        state_table.delete_item.assert_not_called()
+
+    @patch.dict(
+        os.environ,
+        {
+            "TABLE_NAME": "state-table",
+            "COST_HISTORY_TABLE": "history-table",
+            "ALERTS_TOPIC_ARN": "arn:aws:sns:us-east-1:123456789012:topic",
+            "THRESHOLD": "0.10",
+            "ENABLE_DAILY_PK": "false",
+            "ENABLE_MONTHLY_ROLLUP": "true",
+        },
+        clear=True,
+    )
+    @patch("boto3.resource")
+    @patch("boto3.client")
+    def test_pending_retry_ignored_if_topic_mismatch(self, mock_boto_client, mock_boto_resource):
+        """
+        Pending alert should be ignored if topic ARN doesn't match current ALERTS_TOPIC_ARN.
+        """
+        state_table = MagicMock()
+        history_table = MagicMock()
+
+        state_table.get_item.return_value = {
+            "Item": {
+                "key": "alert_pending",
+                "topic_arn": "arn:aws:sns:us-east-1:999999999999:other",
+                "subject": "CostGuardian BREACH",
+                "message": "pending message",
+            }
+        }
+
+        dynamodb = MagicMock()
+        dynamodb.Table.side_effect = lambda name: state_table if name == "state-table" else history_table
+        mock_boto_resource.return_value = dynamodb
+
+        ce = MagicMock()
+        sns = MagicMock()
+
+        def client_factory(service, **kwargs):
+            return {"ce": ce, "sns": sns}[service]
+
+        mock_boto_client.side_effect = client_factory
+
+        ce.get_cost_and_usage.side_effect = [
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.01", "Unit": "USD"}}}]},
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},
+        ]
+        history_table.put_item.return_value = None
+
+        res = handler({}, {})
+        self.assertTrue(res["ok"])
+        sns.publish.assert_not_called()
+        state_table.delete_item.assert_not_called()
+
+    @patch.dict(
+        os.environ,
+        {
+            "TABLE_NAME": "state-table",
+            "COST_HISTORY_TABLE": "history-table",
+            "ALERTS_TOPIC_ARN": "arn:aws:sns:us-east-1:123456789012:topic",
+            "THRESHOLD": "0.10",
+            "ENABLE_DAILY_PK": "false",
+            "ENABLE_MONTHLY_ROLLUP": "true",
+        },
+        clear=True,
+    )
+    @patch("boto3.resource")
+    @patch("boto3.client")
+    def test_state_write_failure_is_ignored(self, mock_boto_client, mock_boto_resource):
+        """
+        If state_table.put_item fails for the 'latest' write, the handler should still return ok.
+        """
+        state_table = MagicMock()
+        history_table = MagicMock()
+        state_table.get_item.return_value = {}
+
+        # Make ONLY state writes fail
+        state_table.put_item.side_effect = dynamo_throttle_error()
+
+        dynamodb = MagicMock()
+        dynamodb.Table.side_effect = lambda name: state_table if name == "state-table" else history_table
+        mock_boto_resource.return_value = dynamodb
+
+        ce = MagicMock()
+        sns = MagicMock()
+
+        def client_factory(service, **kwargs):
+            return {"ce": ce, "sns": sns}[service]
+
+        mock_boto_client.side_effect = client_factory
+
+        ce.get_cost_and_usage.side_effect = [
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.05", "Unit": "USD"}}}]},
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},
+        ]
+        history_table.put_item.return_value = None
+
+        res = handler({}, {})
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["status"], "OK")
+
+    @patch.dict(
+        os.environ,
+        {
+            "TABLE_NAME": "state-table",
+            "COST_HISTORY_TABLE": "history-table",
+            "ALERTS_TOPIC_ARN": "arn:aws:sns:us-east-1:123456789012:topic",
+            "THRESHOLD": "0.10",
+            "ENABLE_DAILY_PK": "false",
+            "ENABLE_MONTHLY_ROLLUP": "true",
+            "ENFORCEMENT_ENABLED": "true",
+            "ENFORCEMENT_DRY_RUN": "true",
+            # Missing tag key/value on purpose
+            "ENFORCEMENT_TAG_KEY": "",
+            "ENFORCEMENT_TAG_VALUE": "",
+            "ENFORCEMENT_REGIONS": "us-east-1",
+        },
+        clear=True,
+    )
+    @patch("boto3.resource")
+    @patch("boto3.client")
+    def test_enforcement_enabled_but_missing_tag_does_not_call_ec2(self, mock_boto_client, mock_boto_resource):
+        """
+        If enforcement is enabled but tag key/value missing, it should be skipped safely.
+        """
+        state_table = MagicMock()
+        history_table = MagicMock()
+        state_table.get_item.return_value = {}
+
+        dynamodb = MagicMock()
+        dynamodb.Table.side_effect = lambda name: state_table if name == "state-table" else history_table
+        mock_boto_resource.return_value = dynamodb
+
+        ce = MagicMock()
+        sns = MagicMock()
+
+        def client_factory(service, **kwargs):
+            if service == "ce":
+                return ce
+            if service == "sns":
+                return sns
+            if service == "ec2":
+                raise AssertionError("EC2 client should NOT be created when tag missing")
+            raise KeyError(service)
+
+        mock_boto_client.side_effect = client_factory
+
+        ce.get_cost_and_usage.side_effect = [
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.50", "Unit": "USD"}}}]},  # BREACH
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},  # rollup
+        ]
+        history_table.put_item.return_value = None
+        sns.publish.return_value = {"MessageId": "abc"}
+
+        res = handler({}, {})
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["status"], "BREACH")
+
+    @patch.dict(
+        os.environ,
+        {
+            "TABLE_NAME": "state-table",
+            "COST_HISTORY_TABLE": "history-table",
+            "ALERTS_TOPIC_ARN": "arn:aws:sns:us-east-1:123456789012:topic",
+            "THRESHOLD": "0.10",
+            "ENABLE_DAILY_PK": "false",
+            "ENABLE_MONTHLY_ROLLUP": "true",
+            "ENFORCEMENT_ENABLED": "true",
+            "ENFORCEMENT_DRY_RUN": "true",
+            "ENFORCEMENT_TAG_KEY": "CostControl",
+            "ENFORCEMENT_TAG_VALUE": "StopOnBreach",
+            # No regions + no AWS_REGION => should skip
+            "ENFORCEMENT_REGIONS": "",
+        },
+        clear=True,
+    )
+    @patch("boto3.resource")
+    @patch("boto3.client")
+    def test_enforcement_enabled_but_no_regions_does_not_call_ec2(self, mock_boto_client, mock_boto_resource):
+        state_table = MagicMock()
+        history_table = MagicMock()
+        state_table.get_item.return_value = {}
+
+        dynamodb = MagicMock()
+        dynamodb.Table.side_effect = lambda name: state_table if name == "state-table" else history_table
+        mock_boto_resource.return_value = dynamodb
+
+        ce = MagicMock()
+        sns = MagicMock()
+
+        def client_factory(service, **kwargs):
+            if service == "ce":
+                return ce
+            if service == "sns":
+                return sns
+            if service == "ec2":
+                raise AssertionError("EC2 client should NOT be created when regions are empty")
+            raise KeyError(service)
+
+        mock_boto_client.side_effect = client_factory
+
+        ce.get_cost_and_usage.side_effect = [
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.50", "Unit": "USD"}}}]},  # BREACH
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},  # rollup
+        ]
+        history_table.put_item.return_value = None
+        sns.publish.return_value = {"MessageId": "abc"}
+
+        res = handler({}, {})
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["status"], "BREACH")
