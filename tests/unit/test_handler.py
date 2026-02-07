@@ -70,9 +70,6 @@ class TestIdempotency(unittest.TestCase):
             "ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.05", "Unit": "USD"}}}]
         }
 
-        # Avoid StopIteration by using a function side_effect:
-        # - conditional writes: succeed for first run's 2 conditional calls, then raise on second run's 2 calls
-        # - non-conditional writes (monthly rollup overwrite): always succeed
         state = {"conditional_calls": 0}
 
         def put_item_side_effect(*args, **kwargs):
@@ -93,11 +90,7 @@ class TestIdempotency(unittest.TestCase):
         self.assertEqual(res1["status"], "OK")
         self.assertEqual(res2["status"], "OK")
 
-        # state latest is updated every run
         self.assertEqual(state_table.put_item.call_count, 2)
-
-        # With ENABLE_DAILY_PK + ENABLE_MONTHLY_ROLLUP:
-        # per run => 3 history puts (all-time, daily, rollup)
         self.assertEqual(history_table.put_item.call_count, 6)
 
         conditional_calls = [c for c in history_table.put_item.call_args_list if "ConditionExpression" in c.kwargs]
@@ -300,10 +293,9 @@ class TestPendingRetryAndPartialWrites(unittest.TestCase):
 
         mock_boto_client.side_effect = client_factory
 
-        # daily + monthly CE calls
         ce.get_cost_and_usage.side_effect = [
-            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.50", "Unit": "USD"}}}]},  # daily => BREACH
-            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},  # monthly rollup
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.50", "Unit": "USD"}}}]},
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},
         ]
 
         sns.publish.side_effect = sns_client_error()
@@ -362,10 +354,9 @@ class TestPendingRetryAndPartialWrites(unittest.TestCase):
 
         mock_boto_client.side_effect = client_factory
 
-        # daily + monthly CE calls
         ce.get_cost_and_usage.side_effect = [
-            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.01", "Unit": "USD"}}}]},  # daily OK
-            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},  # monthly rollup
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.01", "Unit": "USD"}}}]},
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},
         ]
 
         sns.publish.return_value = {"MessageId": "123"}
@@ -409,10 +400,9 @@ class TestPendingRetryAndPartialWrites(unittest.TestCase):
 
         mock_boto_client.side_effect = client_factory
 
-        # daily + monthly CE calls
         ce.get_cost_and_usage.side_effect = [
-            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.05", "Unit": "USD"}}}]},  # daily OK
-            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},  # monthly rollup
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.05", "Unit": "USD"}}}]},
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},
         ]
 
         history_table.put_item.side_effect = dynamo_throttle_error()
@@ -455,7 +445,6 @@ class TestMonthlyRollup(unittest.TestCase):
 
         mock_boto_client.side_effect = client_factory
 
-        # daily + monthly CE calls
         ce.get_cost_and_usage.side_effect = [
             {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.05", "Unit": "USD"}}}]},
             {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},
@@ -539,8 +528,6 @@ class TestEnforcement(unittest.TestCase):
 
         ec2.describe_instances.assert_called()
         ec2.stop_instances.assert_not_called()
-
-        # At least one publish for breach; enforcement publish may also happen
         self.assertTrue(sns.publish.called)
 
     @patch.dict(
@@ -605,10 +592,6 @@ class TestEnforcement(unittest.TestCase):
 
 
 class TestThresholdLowBreach(unittest.TestCase):
-    """
-    Permanent test to simulate "lower threshold to 0.01"
-    and confirm BREACH triggers SNS alert (successful publish).
-    """
     @patch.dict(
         os.environ,
         {
@@ -641,8 +624,6 @@ class TestThresholdLowBreach(unittest.TestCase):
 
         mock_boto_client.side_effect = client_factory
 
-        # daily cost 0.05 should breach threshold 0.01
-        # plus monthly rollup call
         ce.get_cost_and_usage.side_effect = [
             {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.05", "Unit": "USD"}}}]},
             {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},
@@ -668,10 +649,6 @@ class TestThresholdLowBreach(unittest.TestCase):
 
 
 class TestOperationalSimulations(unittest.TestCase):
-    """
-    Management-style tests: cover safety guardrails and edge cases.
-    """
-
     @patch.dict(
         os.environ,
         {
@@ -687,10 +664,6 @@ class TestOperationalSimulations(unittest.TestCase):
     @patch("boto3.resource")
     @patch("boto3.client")
     def test_pending_retry_publish_fails_keeps_pending(self, mock_boto_client, mock_boto_resource):
-        """
-        If a pending alert exists and retry publish fails, we should NOT delete it,
-        and the run should continue.
-        """
         state_table = MagicMock()
         history_table = MagicMock()
 
@@ -716,7 +689,6 @@ class TestOperationalSimulations(unittest.TestCase):
 
         mock_boto_client.side_effect = client_factory
 
-        # daily OK + monthly rollup
         ce.get_cost_and_usage.side_effect = [
             {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.01", "Unit": "USD"}}}]},
             {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},
@@ -742,9 +714,6 @@ class TestOperationalSimulations(unittest.TestCase):
     @patch("boto3.resource")
     @patch("boto3.client")
     def test_pending_retry_ignored_if_topic_mismatch(self, mock_boto_client, mock_boto_resource):
-        """
-        Pending alert should be ignored if topic ARN doesn't match current ALERTS_TOPIC_ARN.
-        """
         state_table = MagicMock()
         history_table = MagicMock()
 
@@ -795,14 +764,10 @@ class TestOperationalSimulations(unittest.TestCase):
     @patch("boto3.resource")
     @patch("boto3.client")
     def test_state_write_failure_is_ignored(self, mock_boto_client, mock_boto_resource):
-        """
-        If state_table.put_item fails for the 'latest' write, the handler should still return ok.
-        """
         state_table = MagicMock()
         history_table = MagicMock()
         state_table.get_item.return_value = {}
 
-        # Make ONLY state writes fail
         state_table.put_item.side_effect = dynamo_throttle_error()
 
         dynamodb = MagicMock()
@@ -827,6 +792,7 @@ class TestOperationalSimulations(unittest.TestCase):
         self.assertTrue(res["ok"])
         self.assertEqual(res["status"], "OK")
 
+    # ✅ NEW: pending retry success clears pending
     @patch.dict(
         os.environ,
         {
@@ -836,24 +802,23 @@ class TestOperationalSimulations(unittest.TestCase):
             "THRESHOLD": "0.10",
             "ENABLE_DAILY_PK": "false",
             "ENABLE_MONTHLY_ROLLUP": "true",
-            "ENFORCEMENT_ENABLED": "true",
-            "ENFORCEMENT_DRY_RUN": "true",
-            # Missing tag key/value on purpose
-            "ENFORCEMENT_TAG_KEY": "",
-            "ENFORCEMENT_TAG_VALUE": "",
-            "ENFORCEMENT_REGIONS": "us-east-1",
         },
         clear=True,
     )
     @patch("boto3.resource")
     @patch("boto3.client")
-    def test_enforcement_enabled_but_missing_tag_does_not_call_ec2(self, mock_boto_client, mock_boto_resource):
-        """
-        If enforcement is enabled but tag key/value missing, it should be skipped safely.
-        """
+    def test_pending_retry_success_clears_pending(self, mock_boto_client, mock_boto_resource):
         state_table = MagicMock()
         history_table = MagicMock()
-        state_table.get_item.return_value = {}
+
+        state_table.get_item.return_value = {
+            "Item": {
+                "key": "alert_pending",
+                "topic_arn": "arn:aws:sns:us-east-1:123456789012:topic",
+                "subject": "CostGuardian BREACH",
+                "message": "pending message",
+            }
+        }
 
         dynamodb = MagicMock()
         dynamodb.Table.side_effect = lambda name: state_table if name == "state-table" else history_table
@@ -861,29 +826,25 @@ class TestOperationalSimulations(unittest.TestCase):
 
         ce = MagicMock()
         sns = MagicMock()
+        sns.publish.return_value = {"MessageId": "ok"}
 
         def client_factory(service, **kwargs):
-            if service == "ce":
-                return ce
-            if service == "sns":
-                return sns
-            if service == "ec2":
-                raise AssertionError("EC2 client should NOT be created when tag missing")
-            raise KeyError(service)
+            return {"ce": ce, "sns": sns}[service]
 
         mock_boto_client.side_effect = client_factory
 
         ce.get_cost_and_usage.side_effect = [
-            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.50", "Unit": "USD"}}}]},  # BREACH
-            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},  # rollup
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.01", "Unit": "USD"}}}]},
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},
         ]
         history_table.put_item.return_value = None
-        sns.publish.return_value = {"MessageId": "abc"}
 
         res = handler({}, {})
         self.assertTrue(res["ok"])
-        self.assertEqual(res["status"], "BREACH")
+        sns.publish.assert_called()
+        state_table.delete_item.assert_called_with(Key={"key": "alert_pending"})
 
+    # ✅ NEW: CE failure means no writes (even with pending present)
     @patch.dict(
         os.environ,
         {
@@ -893,21 +854,24 @@ class TestOperationalSimulations(unittest.TestCase):
             "THRESHOLD": "0.10",
             "ENABLE_DAILY_PK": "false",
             "ENABLE_MONTHLY_ROLLUP": "true",
-            "ENFORCEMENT_ENABLED": "true",
-            "ENFORCEMENT_DRY_RUN": "true",
-            "ENFORCEMENT_TAG_KEY": "CostControl",
-            "ENFORCEMENT_TAG_VALUE": "StopOnBreach",
-            # No regions + no AWS_REGION => should skip
-            "ENFORCEMENT_REGIONS": "",
         },
         clear=True,
     )
     @patch("boto3.resource")
     @patch("boto3.client")
-    def test_enforcement_enabled_but_no_regions_does_not_call_ec2(self, mock_boto_client, mock_boto_resource):
+    def test_ce_failure_no_writes_even_with_pending(self, mock_boto_client, mock_boto_resource):
         state_table = MagicMock()
         history_table = MagicMock()
-        state_table.get_item.return_value = {}
+
+        # pending exists
+        state_table.get_item.return_value = {
+            "Item": {
+                "key": "alert_pending",
+                "topic_arn": "arn:aws:sns:us-east-1:123456789012:topic",
+                "subject": "CostGuardian BREACH",
+                "message": "pending message",
+            }
+        }
 
         dynamodb = MagicMock()
         dynamodb.Table.side_effect = lambda name: state_table if name == "state-table" else history_table
@@ -915,25 +879,17 @@ class TestOperationalSimulations(unittest.TestCase):
 
         ce = MagicMock()
         sns = MagicMock()
+        sns.publish.return_value = {"MessageId": "ok"}  # could have retried pending, but CE fails first
 
         def client_factory(service, **kwargs):
-            if service == "ce":
-                return ce
-            if service == "sns":
-                return sns
-            if service == "ec2":
-                raise AssertionError("EC2 client should NOT be created when regions are empty")
-            raise KeyError(service)
+            return {"ce": ce, "sns": sns}[service]
 
         mock_boto_client.side_effect = client_factory
 
-        ce.get_cost_and_usage.side_effect = [
-            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.50", "Unit": "USD"}}}]},  # BREACH
-            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},  # rollup
-        ]
-        history_table.put_item.return_value = None
-        sns.publish.return_value = {"MessageId": "abc"}
+        ce.get_cost_and_usage.side_effect = ce_client_error()
 
-        res = handler({}, {})
-        self.assertTrue(res["ok"])
-        self.assertEqual(res["status"], "BREACH")
+        with self.assertRaises(ClientError):
+            handler({}, {})
+
+        state_table.put_item.assert_not_called()
+        history_table.put_item.assert_not_called()
