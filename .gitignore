@@ -8,3 +8,35 @@ __pycache__
 # CDK asset staging directory
 .cdk.staging
 cdk.out
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtualenv
+.venv/
+venv/
+ENV/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build / tooling
+cdk.out/
+dist/
+build/
+*.egg-info/
+
+# Secrets
+.env
+.env.*
+!*.example
+
+out.json
+key.json
+eav.json
+eav_today.json
