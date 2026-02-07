@@ -70,6 +70,9 @@ class TestIdempotency(unittest.TestCase):
             "ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.05", "Unit": "USD"}}}]
         }
 
+        # Avoid StopIteration by using a function side_effect:
+        # - conditional writes: succeed for first run's 2 conditional calls, then raise on second run's 2 calls
+        # - non-conditional writes (monthly rollup overwrite): always succeed
         state = {"conditional_calls": 0}
 
         def put_item_side_effect(*args, **kwargs):
@@ -90,7 +93,11 @@ class TestIdempotency(unittest.TestCase):
         self.assertEqual(res1["status"], "OK")
         self.assertEqual(res2["status"], "OK")
 
+        # state latest is updated every run
         self.assertEqual(state_table.put_item.call_count, 2)
+
+        # With ENABLE_DAILY_PK + ENABLE_MONTHLY_ROLLUP:
+        # per run => 3 history puts (all-time, daily, rollup)
         self.assertEqual(history_table.put_item.call_count, 6)
 
         conditional_calls = [c for c in history_table.put_item.call_args_list if "ConditionExpression" in c.kwargs]
@@ -293,9 +300,10 @@ class TestPendingRetryAndPartialWrites(unittest.TestCase):
 
         mock_boto_client.side_effect = client_factory
 
+        # daily + monthly CE calls
         ce.get_cost_and_usage.side_effect = [
-            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.50", "Unit": "USD"}}}]},
-            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.50", "Unit": "USD"}}}]},  # daily => BREACH
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},  # monthly rollup
         ]
 
         sns.publish.side_effect = sns_client_error()
@@ -354,9 +362,10 @@ class TestPendingRetryAndPartialWrites(unittest.TestCase):
 
         mock_boto_client.side_effect = client_factory
 
+        # daily + monthly CE calls
         ce.get_cost_and_usage.side_effect = [
-            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.01", "Unit": "USD"}}}]},
-            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.01", "Unit": "USD"}}}]},  # daily OK
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},  # monthly rollup
         ]
 
         sns.publish.return_value = {"MessageId": "123"}
@@ -400,9 +409,10 @@ class TestPendingRetryAndPartialWrites(unittest.TestCase):
 
         mock_boto_client.side_effect = client_factory
 
+        # daily + monthly CE calls
         ce.get_cost_and_usage.side_effect = [
-            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.05", "Unit": "USD"}}}]},
-            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.05", "Unit": "USD"}}}]},  # daily OK
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},  # monthly rollup
         ]
 
         history_table.put_item.side_effect = dynamo_throttle_error()
@@ -445,6 +455,7 @@ class TestMonthlyRollup(unittest.TestCase):
 
         mock_boto_client.side_effect = client_factory
 
+        # daily + monthly CE calls
         ce.get_cost_and_usage.side_effect = [
             {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.05", "Unit": "USD"}}}]},
             {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},
@@ -511,7 +522,6 @@ class TestEnforcement(unittest.TestCase):
 
         mock_boto_client.side_effect = client_factory
 
-        # daily BREACH + monthly rollup
         ce.get_cost_and_usage.side_effect = [
             {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.50", "Unit": "USD"}}}]},
             {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},
@@ -519,24 +529,18 @@ class TestEnforcement(unittest.TestCase):
 
         history_table.put_item.return_value = None
 
-        # EC2 match two running instances
         ec2.describe_instances.return_value = {
-            "Reservations": [
-                {"Instances": [{"InstanceId": "i-1"}, {"InstanceId": "i-2"}]}
-            ]
+            "Reservations": [{"Instances": [{"InstanceId": "i-1"}, {"InstanceId": "i-2"}]}]
         }
 
         res = handler({}, {})
         self.assertTrue(res["ok"])
         self.assertEqual(res["status"], "BREACH")
 
-        # dry run => should NOT stop instances
+        ec2.describe_instances.assert_called()
         ec2.stop_instances.assert_not_called()
 
-        # should have described
-        ec2.describe_instances.assert_called()
-
-        # enforcement notification should be published (best-effort)
+        # At least one publish for breach; enforcement publish may also happen
         self.assertTrue(sns.publish.called)
 
     @patch.dict(
@@ -582,7 +586,6 @@ class TestEnforcement(unittest.TestCase):
 
         mock_boto_client.side_effect = client_factory
 
-        # daily BREACH + monthly rollup
         ce.get_cost_and_usage.side_effect = [
             {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.50", "Unit": "USD"}}}]},
             {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},
@@ -599,3 +602,71 @@ class TestEnforcement(unittest.TestCase):
         self.assertEqual(res["status"], "BREACH")
 
         ec2.stop_instances.assert_called()
+
+
+class TestThresholdLowBreach(unittest.TestCase):
+    """
+    Option B: permanent test to simulate "lower threshold to 0.01"
+    and confirm BREACH triggers SNS alert (successful publish).
+    """
+    @patch.dict(
+        os.environ,
+        {
+            "TABLE_NAME": "state-table",
+            "COST_HISTORY_TABLE": "history-table",
+            "ALERTS_TOPIC_ARN": "arn:aws:sns:us-east-1:123456789012:topic",
+            "THRESHOLD": "0.01",  # << lowered threshold
+            "ENABLE_DAILY_PK": "false",
+            "ENABLE_MONTHLY_ROLLUP": "true",
+            # enforcement disabled for this test
+            "ENFORCEMENT_ENABLED": "false",
+        },
+        clear=True,
+    )
+    @patch("boto3.resource")
+    @patch("boto3.client")
+    def test_low_threshold_triggers_breach_and_publishes_sns(self, mock_boto_client, mock_boto_resource):
+        state_table = MagicMock()
+        history_table = MagicMock()
+        state_table.get_item.return_value = {}
+
+        dynamodb = MagicMock()
+        dynamodb.Table.side_effect = lambda name: state_table if name == "state-table" else history_table
+        mock_boto_resource.return_value = dynamodb
+
+        ce = MagicMock()
+        sns = MagicMock()
+
+        def client_factory(service, **kwargs):
+            return {"ce": ce, "sns": sns}[service]
+
+        mock_boto_client.side_effect = client_factory
+
+        # daily cost 0.05 should breach threshold 0.01
+        # plus monthly rollup call
+        ce.get_cost_and_usage.side_effect = [
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "0.05", "Unit": "USD"}}}]},
+            {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.23", "Unit": "USD"}}}]},
+        ]
+
+        history_table.put_item.return_value = None
+        sns.publish.return_value = {"MessageId": "abc"}
+
+        res = handler({}, {})
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["status"], "BREACH")
+
+        # SNS breach alert should be published
+        self.assertTrue(sns.publish.called)
+
+        # Confirm the BREACH subject was used at least once
+        subjects = [c.kwargs.get("Subject") for c in sns.publish.call_args_list]
+        self.assertIn("CostGuardian BREACH", subjects)
+
+        # Pending alert should NOT be written because publish succeeded
+        pending_writes = [
+            c.kwargs.get("Item", {}).get("key")
+            for c in state_table.put_item.call_args_list
+            if "Item" in c.kwargs
+        ]
+        self.assertNotIn("alert_pending", pending_writes)
