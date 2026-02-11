@@ -1,25 +1,24 @@
-# cost_guardian_stack.py
-
+from constructs import Construct
 from aws_cdk import (
     Stack,
     Duration,
-    CfnOutput,
     RemovalPolicy,
-    aws_lambda as _lambda,
-    aws_events as events,
-    aws_events_targets as targets,
     aws_dynamodb as dynamodb,
+    aws_lambda as _lambda,
     aws_iam as iam,
     aws_sns as sns,
+    aws_events as events,
+    aws_events_targets as targets,
+    aws_logs as logs,
 )
-from constructs import Construct
 
 
 class CostGuardianStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        table = dynamodb.Table(
+        # --- DynamoDB: state table (pk = key) ---
+        state_table = dynamodb.Table(
             self,
             "CostStateTable",
             partition_key=dynamodb.Attribute(name="key", type=dynamodb.AttributeType.STRING),
@@ -27,7 +26,8 @@ class CostGuardianStack(Stack):
             removal_policy=RemovalPolicy.DESTROY,
         )
 
-        cost_history = dynamodb.Table(
+        # --- DynamoDB: cost history table (pk/sk + TTL) ---
+        history_table = dynamodb.Table(
             self,
             "CostHistoryTable",
             table_name="cost_history",
@@ -38,7 +38,8 @@ class CostGuardianStack(Stack):
             removal_policy=RemovalPolicy.DESTROY,
         )
 
-        enforcement_log = dynamodb.Table(
+        # --- DynamoDB: enforcement log table (pk/sk) ---
+        enforcement_log_table = dynamodb.Table(
             self,
             "EnforcementLogTable",
             table_name="enforcement_log",
@@ -48,51 +49,42 @@ class CostGuardianStack(Stack):
             removal_policy=RemovalPolicy.DESTROY,
         )
 
+        # --- SNS topic ---
         alerts_topic = sns.Topic(
             self,
             "AlertsTopic",
             topic_name="cost-guardian-alerts",
         )
 
+        # --- Lambda ---
+        # IMPORTANT: CI was failing because the stack referenced a non-existent "./lambda" folder.
+        # Your handler is in "cost_guardian/handler.py", so we package from "cost_guardian".
         monitor_lambda = _lambda.Function(
             self,
             "MonitorLambda",
             runtime=_lambda.Runtime.PYTHON_3_12,
             handler="handler.handler",
-            code=_lambda.Code.from_asset("lambda"),
+            code=_lambda.Code.from_asset("cost_guardian"),
+            memory_size=256,
+            timeout=Duration.seconds(90),
+            log_retention=logs.RetentionDays.TWO_YEARS,
             environment={
-                "TABLE_NAME": table.table_name,
-                "THRESHOLD": "0.10",
-                "COST_HISTORY_TABLE": cost_history.table_name,
-                "ENFORCEMENT_LOG_TABLE": enforcement_log.table_name,
+                "TABLE_NAME": state_table.table_name,
+                "COST_HISTORY_TABLE": history_table.table_name,
+                "ENFORCEMENT_LOG_TABLE": enforcement_log_table.table_name,
                 "ALERTS_TOPIC_ARN": alerts_topic.topic_arn,
-
-                # === CHANGE (already present in your recent diff, kept here) ===
+                "THRESHOLD": "0.10",
                 "COST_EXPLORER_GRANULARITY": "DAILY",
                 "COST_EXPLORER_METRIC": "UnblendedCost",
                 "HISTORY_TTL_DAYS": "30",
-                
-                "ENABLE_DAILY_PK": "true",
-
-                # === CHANGE (new) ===
-                # Enables "daily partition" write in handler.py:
-                # history_table.put_item(pk="COST#YYYY-MM-DD", sk=ts, ...)
                 "ENABLE_DAILY_PK": "true",
             },
-            timeout=Duration.seconds(90),
-            memory_size=256,
         )
 
-        # Explicit read+write grants (no grant_read_write in your lib)
-        table.grant_read_data(monitor_lambda)
-        table.grant_write_data(monitor_lambda)
-
-        cost_history.grant_read_data(monitor_lambda)
-        cost_history.grant_write_data(monitor_lambda)
-
-        enforcement_log.grant_read_data(monitor_lambda)
-        enforcement_log.grant_write_data(monitor_lambda)
-
+        # Permissions (DynamoDB + SNS + Cost Explorer)
+        state_table.grant_read_write_data(monitor_lambda)
+        history_table.grant_read_write_data(monitor_lambda)
+        enforcement_log_table.grant_read_write_data(monitor_lambda)
         alerts_topic.grant_publish(monitor_lambda)
 
         monitor_lambda.add_to_role_policy(
@@ -102,14 +94,10 @@ class CostGuardianStack(Stack):
             )
         )
 
+        # --- Schedule (every 15 minutes) ---
         rule = events.Rule(
             self,
             "MonitorSchedule",
             schedule=events.Schedule.rate(Duration.minutes(15)),
         )
         rule.add_target(targets.LambdaFunction(monitor_lambda))
-
-        CfnOutput(self, "CostStateTableName", value=table.table_name)
-        CfnOutput(self, "CostHistoryTableName", value=cost_history.table_name)
-        CfnOutput(self, "EnforcementLogTableName", value=enforcement_log.table_name)
-        CfnOutput(self, "AlertsTopicArn", value=alerts_topic.topic_arn)
