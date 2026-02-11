@@ -32,7 +32,7 @@ jobs:
           pip install -r requirements.txt
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
 
-      - name: Run unit tests
+      - name: Run unit tests (discover)
         env:
           PYTHONPATH: .
         run: |
@@ -42,4 +42,4 @@ jobs:
         env:
           PYTHONPATH: .
         run: |
-          npx --yes aws-cdk@2 synth
+          npx --yes aws-cdk@2.215.0 synth
