@@ -42,4 +42,4 @@ jobs:
         env:
           PYTHONPATH: .
         run: |
-          npx --yes aws-cdk@2.215.0 synth
+          npx --yes aws-cdk@2 synth
