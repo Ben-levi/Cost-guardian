@@ -1,4 +1,4 @@
-﻿name: CI - Unit Tests
+name: CI - Unit Tests
 
 on:
   push:
@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12"]
 
     steps:
       - name: Checkout
@@ -36,4 +36,4 @@ jobs:
         env:
           PYTHONPATH: .
         run: |
-          python -m unittest -v tests.unit.test_handler
+          python -m unittest discover -v -s tests -p "test_*.py"
