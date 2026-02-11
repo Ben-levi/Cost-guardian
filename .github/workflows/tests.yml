@@ -32,7 +32,7 @@ jobs:
           pip install -r requirements.txt
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
 
-      - name: Run unit tests
+      - name: Run unit tests (discovery)
         env:
           PYTHONPATH: .
         run: |
