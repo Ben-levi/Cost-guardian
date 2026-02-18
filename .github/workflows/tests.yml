@@ -30,18 +30,6 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      # OIDC -> Assume role (YOU MUST set the role ARN in repo variables or replace it here)
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
-          aws-region: us-east-1
-
-      - name: Who am I in AWS? (proof)
-        run: |
-          aws sts get-caller-identity
-          aws configure list
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -53,6 +41,18 @@ jobs:
           PYTHONPATH: .
         run: |
           python -m unittest discover -v -s tests -p "test_*.py"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: us-east-1
+          audience: sts.amazonaws.com
+
+      - name: Who am I in AWS?
+        run: |
+          aws sts get-caller-identity
+          aws configure list
 
       - name: CDK Synth
         env:
