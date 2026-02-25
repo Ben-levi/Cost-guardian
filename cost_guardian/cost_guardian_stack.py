@@ -57,8 +57,6 @@ class CostGuardianStack(Stack):
         )
 
         # --- Lambda ---
-        # IMPORTANT: CI was failing because the stack referenced a non-existent "./lambda" folder.
-        # Your handler is in "cost_guardian/handler.py", so we package from "cost_guardian".
         monitor_lambda = _lambda.Function(
             self,
             "MonitorLambda",
@@ -73,11 +71,21 @@ class CostGuardianStack(Stack):
                 "COST_HISTORY_TABLE": history_table.table_name,
                 "ENFORCEMENT_LOG_TABLE": enforcement_log_table.table_name,
                 "ALERTS_TOPIC_ARN": alerts_topic.topic_arn,
-                "THRESHOLD": "0.10",
-                "COST_EXPLORER_GRANULARITY": "DAILY",
+                "THRESHOLD": "35.00",
+                "COST_EXPLORER_GRANULARITY": "MONTHLY",
                 "COST_EXPLORER_METRIC": "UnblendedCost",
                 "HISTORY_TTL_DAYS": "30",
-                "ENABLE_DAILY_PK": "true",
+                "ENABLE_DAILY_PK": "false",
+                "ENABLE_MONTHLY_ROLLUP": "true",
+                "MONTHLY_ROLLUP_TTL_DAYS": "400",
+                "PENDING_ALERT_KEY": "alert_pending",
+                #enforcement defaults can be overridden in Lambda env in console too
+                "ENFORCEMENT_ENABLED": "true",
+                "ENFORCEMENT_ARMED": "false",
+                "ENFORCEMENT_DRY_RUN": "true",
+                "ENFORCEMENT_REGIONS": "us-east-1",
+                "ENFORCEMENT_TAG_KEY": "CostGuardianManaged",
+                "ENFORCEMENT_TAG_VALUE": "true",
             },
         )
 
@@ -87,9 +95,21 @@ class CostGuardianStack(Stack):
         enforcement_log_table.grant_read_write_data(monitor_lambda)
         alerts_topic.grant_publish(monitor_lambda)
 
+        # Cost Explorer
         monitor_lambda.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["ce:GetCostAndUsage"],
+                resources=["*"],
+            )
+        )
+
+        # ✅ EC2 permissions needed for enforcement mode
+        monitor_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "ec2:DescribeInstances",
+                    "ec2:StopInstances",
+                ],
                 resources=["*"],
             )
         )

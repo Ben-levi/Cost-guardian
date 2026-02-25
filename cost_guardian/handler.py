@@ -59,12 +59,22 @@ def _parse_regions() -> list[str]:
 
 
 def _enforcement_config():
+    """
+    Returns:
+      enabled: bool
+      dry_run: bool
+      armed: bool
+      tag_key: str
+      tag_value: str
+      regions: list[str]
+    """
     enabled = _env_truthy("ENFORCEMENT_ENABLED", "false")
     dry_run = _env_truthy("ENFORCEMENT_DRY_RUN", "true")  # safe default
+    armed = _env_truthy("ENFORCEMENT_ARMED", "false")     # safety latch (must be explicitly armed)
     tag_key = os.environ.get("ENFORCEMENT_TAG_KEY", "").strip()
     tag_value = os.environ.get("ENFORCEMENT_TAG_VALUE", "").strip()
     regions = _parse_regions()
-    return enabled, dry_run, tag_key, tag_value, regions
+    return enabled, dry_run, armed, tag_key, tag_value, regions
 
 
 def _enforce_stop_instances(tag_key: str, tag_value: str, regions: list[str], dry_run: bool) -> dict:
@@ -119,7 +129,7 @@ def _enforce_stop_instances(tag_key: str, tag_value: str, regions: list[str], dr
 def handler(event, context):
     # Runtime config (read at runtime so tests can patch os.environ)
     threshold = float(os.environ.get("THRESHOLD", "0.10"))
-    granularity = os.environ.get("COST_EXPLORER_GRANULARITY", "DAILY")
+    granularity = os.environ.get("COST_EXPLORER_GRANULARITY", "DAILY").strip().upper()
     metric = os.environ.get("COST_EXPLORER_METRIC", "UnblendedCost")
     history_ttl_days = int(os.environ.get("HISTORY_TTL_DAYS", "30"))
     enable_daily_pk = _env_truthy("ENABLE_DAILY_PK", "false")
@@ -130,8 +140,15 @@ def handler(event, context):
     pending_alert_key = os.environ.get("PENDING_ALERT_KEY", "alert_pending")
     pending_alert_ttl_days = int(os.environ.get("PENDING_ALERT_TTL_DAYS", "7"))
 
-    # Enforcement config
-    enforcement_enabled, enforcement_dry_run, enforcement_tag_key, enforcement_tag_value, enforcement_regions = _enforcement_config()
+    # Enforcement config (now includes ENFORCEMENT_ARMED)
+    (
+        enforcement_enabled,
+        enforcement_dry_run,
+        enforcement_armed,
+        enforcement_tag_key,
+        enforcement_tag_value,
+        enforcement_regions,
+    ) = _enforcement_config()
 
     ts = _iso_ts()
     minute_ts = _iso_minute_ts()
@@ -166,28 +183,39 @@ def handler(event, context):
     except (ClientError, BotoCoreError, KeyError, TypeError) as e:
         print(json.dumps({"msg": "pending alert check failed (ignored)", "error": str(e)}))
 
+    # ---- Decide time window based on DAILY vs MONTHLY ----
+    # NOTE: In MONTHLY mode, threshold is treated as *monthly MTD budget*.
+    if granularity == "MONTHLY":
+        start = _month_start_from_iso_day(today)
+        end = (datetime.fromisoformat(today) + timedelta(days=1)).date().isoformat()
+        ce_granularity = "MONTHLY"
+        threshold_label = "threshold_usd_per_month"
+    else:
+        start = today
+        end = (datetime.fromisoformat(today) + timedelta(days=1)).date().isoformat()
+        ce_granularity = granularity  # typically DAILY
+        threshold_label = "threshold_usd_per_day"
+
     print(json.dumps({
         "msg": "cost-guardian collector start",
         "ts": ts,
         "minute_ts": minute_ts,
-        "threshold_usd_per_day": threshold,
+        threshold_label: threshold,
         "granularity": granularity,
         "metric": metric,
         "enable_daily_pk": enable_daily_pk,
         "enable_monthly_rollup": enable_monthly_rollup,
         "enforcement_enabled": enforcement_enabled,
         "enforcement_dry_run": enforcement_dry_run,
+        "enforcement_armed": enforcement_armed,
         "enforcement_regions": enforcement_regions,
     }))
 
-    start = today
-    end = (datetime.fromisoformat(today) + timedelta(days=1)).date().isoformat()
-
     try:
-        # ---- 1) Fetch daily cost ----
+        # ---- 1) Fetch cost (DAILY: today; MONTHLY: MTD) ----
         resp = ce.get_cost_and_usage(
             TimePeriod={"Start": start, "End": end},
-            Granularity=granularity,
+            Granularity=ce_granularity,
             Metrics=[metric],
         )
         amount_str = resp["ResultsByTime"][0]["Total"][metric]["Amount"]
@@ -212,6 +240,7 @@ def handler(event, context):
             "threshold": threshold_d,
             "status": status,
             "ttl": ttl,
+            "mode": granularity,  # helpful for later debugging
         }
 
         def put_history_idempotent(item: dict):
@@ -240,6 +269,7 @@ def handler(event, context):
                 print(json.dumps({"msg": "history write failed (daily; ignored)", "error": str(e)}))
 
         # ---- 2b) Monthly rollup (best effort) ----
+        # If we are already in MONTHLY mode, reuse the fetched MTD cost (no extra CE call).
         if enable_monthly_rollup:
             month_key = _month_key_from_iso_day(today)
             month_start = _month_start_from_iso_day(today)
@@ -247,14 +277,18 @@ def handler(event, context):
             rollup_ttl = _ttl_epoch(monthly_rollup_ttl_days)
 
             try:
-                mtd_resp = ce.get_cost_and_usage(
-                    TimePeriod={"Start": month_start, "End": end},
-                    Granularity="MONTHLY",
-                    Metrics=[metric],
-                )
-                mtd_amount_str = mtd_resp["ResultsByTime"][0]["Total"][metric]["Amount"]
-                mtd_unit = mtd_resp["ResultsByTime"][0]["Total"][metric]["Unit"]
-                mtd_cost = float(mtd_amount_str)
+                if granularity == "MONTHLY":
+                    mtd_cost = cost
+                    mtd_unit = unit
+                else:
+                    mtd_resp = ce.get_cost_and_usage(
+                        TimePeriod={"Start": month_start, "End": end},
+                        Granularity="MONTHLY",
+                        Metrics=[metric],
+                    )
+                    mtd_amount_str = mtd_resp["ResultsByTime"][0]["Total"][metric]["Amount"]
+                    mtd_unit = mtd_resp["ResultsByTime"][0]["Total"][metric]["Unit"]
+                    mtd_cost = float(mtd_amount_str)
 
                 monthly_item = {
                     "pk": month_pk,
@@ -282,6 +316,7 @@ def handler(event, context):
                 "unit": unit,
                 "threshold": threshold_d,
                 "status": status,
+                "mode": granularity,
             })
         except (ClientError, BotoCoreError) as e:
             print(json.dumps({"msg": "state write failed (ignored)", "error": str(e)}))
@@ -297,11 +332,64 @@ def handler(event, context):
 
         # ---- 4) BREACH flows ----
         if status == "BREACH":
+            # Build ONE combined email body: breach + enforcement result
+            if granularity == "MONTHLY":
+                breach_line = (
+                    f"[CostGuardian] BREACH (MONTHLY MTD): mtd_cost={cost:.4f} {unit} "
+                    f">= threshold={threshold:.4f} {unit} (as_of={today})"
+                )
+            else:
+                breach_line = (
+                    f"[CostGuardian] BREACH (DAILY): daily_cost={cost:.4f} {unit} "
+                    f">= threshold={threshold:.4f} {unit} (date={today})"
+                )
+
+            enforcement_block = ""
+            # Enforcement best-effort (does NOT send separate email)
+            if enforcement_enabled:
+                if not enforcement_tag_key or not enforcement_tag_value:
+                    enforcement_block = (
+                        "\n\nENFORCEMENT: enabled but tag key/value missing -> skipped.\n"
+                        "Set ENFORCEMENT_TAG_KEY and ENFORCEMENT_TAG_VALUE."
+                    )
+                elif not enforcement_regions:
+                    enforcement_block = "\n\nENFORCEMENT: enabled but no regions configured -> skipped."
+                else:
+                    # ---- Safety latch ----
+                    # - Dry-run: allowed regardless of armed flag (discover + log only)
+                    # - Not dry-run: requires ENFORCEMENT_ARMED=true
+                    if (not enforcement_dry_run) and (not enforcement_armed):
+                        print(json.dumps({"msg": "enforcement not armed; skipping stop"}))
+                        enforcement_block = (
+                            "\n\nENFORCEMENT: NOT ARMED -> skip stop.\n"
+                            "Set ENFORCEMENT_ARMED=true only when you're sure."
+                        )
+                    else:
+                        try:
+                            result = _enforce_stop_instances(
+                                tag_key=enforcement_tag_key,
+                                tag_value=enforcement_tag_value,
+                                regions=enforcement_regions,
+                                dry_run=enforcement_dry_run,
+                            )
+                            print(json.dumps({"msg": "enforcement result", "result": result}))
+
+                            mode = "DRY_RUN" if enforcement_dry_run else "STOPPED"
+                            enforcement_block = (
+                                f"\n\nENFORCEMENT {mode}:\n"
+                                f"- Armed: {enforcement_armed}\n"
+                                f"- Tag filter: {enforcement_tag_key}={enforcement_tag_value}\n"
+                                f"- Regions: {', '.join(enforcement_regions)}\n"
+                                f"- Matched: {result.get('total_matched', 0)}\n"
+                                f"- Stopped: {result.get('total_stopped', 0)}\n"
+                                f"- Details: {json.dumps(result.get('regions', {}))}"
+                            )
+
+                        except (ClientError, BotoCoreError, ValueError, TypeError) as e:
+                            enforcement_block = f"\n\nENFORCEMENT: failed (ignored): {str(e)}"
+
             subject = "CostGuardian BREACH"
-            message = (
-                f"[CostGuardian] BREACH: daily cost={cost:.4f} {unit} "
-                f">= threshold={threshold:.4f} {unit} (date={today})"
-            )
+            message = breach_line + enforcement_block
 
             # 4a) BREACH alert (pending-retry on failure)
             try:
@@ -331,44 +419,6 @@ def handler(event, context):
                 except (ClientError, BotoCoreError) as ee:
                     print(json.dumps({"msg": "failed to store pending alert (ignored)", "error": str(ee)}))
 
-            # 4b) ENFORCEMENT (best-effort; never fail run)
-            if enforcement_enabled:
-                if not enforcement_tag_key or not enforcement_tag_value:
-                    print(json.dumps({"msg": "enforcement enabled but tag key/value missing (ignored)"}))
-                elif not enforcement_regions:
-                    print(json.dumps({"msg": "enforcement enabled but no regions configured (ignored)"}))
-                else:
-                    try:
-                        result = _enforce_stop_instances(
-                            tag_key=enforcement_tag_key,
-                            tag_value=enforcement_tag_value,
-                            regions=enforcement_regions,
-                            dry_run=enforcement_dry_run,
-                        )
-                        print(json.dumps({"msg": "enforcement result", "result": result}))
-
-                        mode = "DRY_RUN" if enforcement_dry_run else "STOPPED"
-                        enforcement_message = (
-                            f"[CostGuardian] ENFORCEMENT {mode}: BREACH detected on {today}.\n"
-                            f"Tag filter: {enforcement_tag_key}={enforcement_tag_value}\n"
-                            f"Regions: {', '.join(enforcement_regions)}\n"
-                            f"Matched: {result.get('total_matched', 0)}\n"
-                            f"Stopped: {result.get('total_stopped', 0)}\n"
-                            f"Details: {json.dumps(result.get('regions', {}))}"
-                        )
-
-                        try:
-                            sns.publish(
-                                TopicArn=alerts_topic_arn,
-                                Subject=f"CostGuardian ENFORCEMENT {mode}",
-                                Message=enforcement_message,
-                            )
-                        except (ClientError, BotoCoreError) as e:
-                            print(json.dumps({"msg": "failed to publish enforcement notification (ignored)", "error": str(e)}))
-
-                    except (ClientError, BotoCoreError, ValueError, TypeError) as e:
-                        print(json.dumps({"msg": "enforcement failed (ignored)", "error": str(e)}))
-
         return {
             "ok": True,
             "date": today,
@@ -377,6 +427,7 @@ def handler(event, context):
             "threshold": float(threshold),
             "status": status,
             "minute_ts": minute_ts,
+            "mode": granularity,
         }
 
     except (ClientError, BotoCoreError, KeyError, IndexError, ValueError, TypeError) as e:
