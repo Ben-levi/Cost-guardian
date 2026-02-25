@@ -4,6 +4,10 @@ __pycache__
 .pytest_cache
 .venv
 *.egg-info
+cdk.out.txt
+lambda-update.json
+latest_key.json
+payload.json
 
 # CDK asset staging directory
 .cdk.staging
