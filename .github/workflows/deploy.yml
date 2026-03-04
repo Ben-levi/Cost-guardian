@@ -1,0 +1,90 @@
+# FILE: .github/workflows/deploy.yml
+name: CI + Manual Deploy (CDK)
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write  # REQUIRED for GitHub OIDC -> AWS
+  actions: read
+
+jobs:
+  test_and_synth:
+    name: Tests + CDK Synth
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node (for CDK CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run unit tests
+        env:
+          PYTHONPATH: .
+        run: |
+          python -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Install CDK CLI
+        run: npm i -g aws-cdk@2
+
+      - name: CDK Synth
+        run: cdk synth
+
+  deploy:
+    name: Manual Deploy (CDK)
+    needs: test_and_synth
+    runs-on: ubuntu-latest
+
+    # IMPORTANT:
+    # Create this GitHub Environment (recommended): "prod"
+    # Add required reviewers for manual approval.
+    environment: prod
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node (for CDK CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install CDK CLI
+        run: npm i -g aws-cdk@2
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: us-east-1
+
+      - name: CDK Deploy (manual approval gated by environment)
+        run: |
+          cdk deploy CostGuardianStack --require-approval never
