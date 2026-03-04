@@ -792,7 +792,6 @@ class TestOperationalSimulations(unittest.TestCase):
         self.assertTrue(res["ok"])
         self.assertEqual(res["status"], "OK")
 
-    # ✅ NEW: pending retry success clears pending
     @patch.dict(
         os.environ,
         {
@@ -845,7 +844,6 @@ class TestOperationalSimulations(unittest.TestCase):
         # cooldown may add extra delete_item calls; ensure pending cleared
         state_table.delete_item.assert_any_call(Key={"key": "alert_pending"})
 
-    # ✅ NEW: CE failure means no writes (even with pending present)
     @patch.dict(
         os.environ,
         {
@@ -864,7 +862,6 @@ class TestOperationalSimulations(unittest.TestCase):
         state_table = MagicMock()
         history_table = MagicMock()
 
-        # pending exists
         state_table.get_item.return_value = {
             "Item": {
                 "key": "alert_pending",
@@ -880,13 +877,12 @@ class TestOperationalSimulations(unittest.TestCase):
 
         ce = MagicMock()
         sns = MagicMock()
-        sns.publish.return_value = {"MessageId": "ok"}  # could have retried pending, but CE fails first
+        sns.publish.return_value = {"MessageId": "ok"}
 
         def client_factory(service, **kwargs):
             return {"ce": ce, "sns": sns}[service]
 
         mock_boto_client.side_effect = client_factory
-
         ce.get_cost_and_usage.side_effect = ce_client_error()
 
         with self.assertRaises(ClientError):
@@ -894,3 +890,214 @@ class TestOperationalSimulations(unittest.TestCase):
 
         state_table.put_item.assert_not_called()
         history_table.put_item.assert_not_called()
+
+
+class TestEnforcementAuditTrail(unittest.TestCase):
+    """
+    Verifies ENFORCEMENT_LOG_TABLE audit writes on BREACH.
+    """
+
+    @patch.dict(
+        os.environ,
+        {
+            "TABLE_NAME": "state-table",
+            "COST_HISTORY_TABLE": "history-table",
+            "ENFORCEMENT_LOG_TABLE": "enforcement-log-table",
+            "ALERTS_TOPIC_ARN": "arn:aws:sns:us-east-1:123456789012:topic",
+            "THRESHOLD": "0.10",
+            "ENABLE_DAILY_PK": "false",
+            "ENABLE_MONTHLY_ROLLUP": "false",
+            "ALERT_COOLDOWN_MINUTES": "0",
+            "ENFORCEMENT_ENABLED": "true",
+            "ENFORCEMENT_DRY_RUN": "true",
+            "ENFORCEMENT_ARMED": "false",
+            "ENFORCEMENT_TAG_KEY": "CostControl",
+            "ENFORCEMENT_TAG_VALUE": "StopOnBreach",
+            "ENFORCEMENT_REGIONS": "us-east-1",
+        },
+        clear=True,
+    )
+    @patch("boto3.resource")
+    @patch("boto3.client")
+    def test_audit_written_dry_run(self, mock_boto_client, mock_boto_resource):
+        state_table = MagicMock()
+        history_table = MagicMock()
+        enforcement_log_table = MagicMock()
+        state_table.get_item.return_value = {}
+
+        dynamodb = MagicMock()
+
+        def table_side_effect(name: str):
+            if name == "state-table":
+                return state_table
+            if name == "history-table":
+                return history_table
+            if name == "enforcement-log-table":
+                return enforcement_log_table
+            raise KeyError(name)
+
+        dynamodb.Table.side_effect = table_side_effect
+        mock_boto_resource.return_value = dynamodb
+
+        ce = MagicMock()
+        sns = MagicMock()
+        ec2 = MagicMock()
+
+        def client_factory(service, **kwargs):
+            if service == "ce":
+                return ce
+            if service == "sns":
+                return sns
+            if service == "ec2":
+                return ec2
+            raise KeyError(service)
+
+        mock_boto_client.side_effect = client_factory
+
+        ce.get_cost_and_usage.return_value = {
+            "ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.00", "Unit": "USD"}}}]
+        }
+
+        ec2.describe_instances.return_value = {
+            "Reservations": [{"Instances": [{"InstanceId": "i-1"}]}]
+        }
+
+        res = handler({}, {})
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["status"], "BREACH")
+
+        enforcement_log_table.put_item.assert_called()
+        item = enforcement_log_table.put_item.call_args.kwargs["Item"]
+        self.assertIn("pk", item)
+        self.assertIn("sk", item)
+        self.assertEqual(item["status"], "DRY_RUN")
+        self.assertEqual(item["tag_key"], "CostControl")
+        self.assertEqual(item["tag_value"], "StopOnBreach")
+
+    @patch.dict(
+        os.environ,
+        {
+            "TABLE_NAME": "state-table",
+            "COST_HISTORY_TABLE": "history-table",
+            "ENFORCEMENT_LOG_TABLE": "enforcement-log-table",
+            "ALERTS_TOPIC_ARN": "arn:aws:sns:us-east-1:123456789012:topic",
+            "THRESHOLD": "0.10",
+            "ENABLE_DAILY_PK": "false",
+            "ENABLE_MONTHLY_ROLLUP": "false",
+            "ALERT_COOLDOWN_MINUTES": "0",
+            "ENFORCEMENT_ENABLED": "true",
+            "ENFORCEMENT_DRY_RUN": "false",
+            "ENFORCEMENT_ARMED": "false",  # not armed => SKIPPED
+            "ENFORCEMENT_TAG_KEY": "CostControl",
+            "ENFORCEMENT_TAG_VALUE": "StopOnBreach",
+            "ENFORCEMENT_REGIONS": "us-east-1",
+        },
+        clear=True,
+    )
+    @patch("boto3.resource")
+    @patch("boto3.client")
+    def test_audit_written_not_armed_skipped(self, mock_boto_client, mock_boto_resource):
+        state_table = MagicMock()
+        history_table = MagicMock()
+        enforcement_log_table = MagicMock()
+        state_table.get_item.return_value = {}
+
+        dynamodb = MagicMock()
+
+        def table_side_effect(name: str):
+            if name == "state-table":
+                return state_table
+            if name == "history-table":
+                return history_table
+            if name == "enforcement-log-table":
+                return enforcement_log_table
+            raise KeyError(name)
+
+        dynamodb.Table.side_effect = table_side_effect
+        mock_boto_resource.return_value = dynamodb
+
+        ce = MagicMock()
+        sns = MagicMock()
+        ec2 = MagicMock()
+
+        def client_factory(service, **kwargs):
+            if service == "ce":
+                return ce
+            if service == "sns":
+                return sns
+            if service == "ec2":
+                return ec2
+            raise KeyError(service)
+
+        mock_boto_client.side_effect = client_factory
+
+        ce.get_cost_and_usage.return_value = {
+            "ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.00", "Unit": "USD"}}}]
+        }
+
+        res = handler({}, {})
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["status"], "BREACH")
+
+        enforcement_log_table.put_item.assert_called()
+        item = enforcement_log_table.put_item.call_args.kwargs["Item"]
+        self.assertEqual(item["status"], "SKIPPED")
+        self.assertEqual(item["reason"], "not armed")
+
+    @patch.dict(
+        os.environ,
+        {
+            "TABLE_NAME": "state-table",
+            "COST_HISTORY_TABLE": "history-table",
+            "ENFORCEMENT_LOG_TABLE": "enforcement-log-table",
+            "ALERTS_TOPIC_ARN": "arn:aws:sns:us-east-1:123456789012:topic",
+            "THRESHOLD": "0.10",
+            "ENABLE_DAILY_PK": "false",
+            "ENABLE_MONTHLY_ROLLUP": "false",
+            "ALERT_COOLDOWN_MINUTES": "0",
+            "ENFORCEMENT_ENABLED": "false",  # enforcement disabled => still audit on BREACH
+        },
+        clear=True,
+    )
+    @patch("boto3.resource")
+    @patch("boto3.client")
+    def test_audit_written_enforcement_disabled(self, mock_boto_client, mock_boto_resource):
+        state_table = MagicMock()
+        history_table = MagicMock()
+        enforcement_log_table = MagicMock()
+        state_table.get_item.return_value = {}
+
+        dynamodb = MagicMock()
+
+        def table_side_effect(name: str):
+            if name == "state-table":
+                return state_table
+            if name == "history-table":
+                return history_table
+            if name == "enforcement-log-table":
+                return enforcement_log_table
+            raise KeyError(name)
+
+        dynamodb.Table.side_effect = table_side_effect
+        mock_boto_resource.return_value = dynamodb
+
+        ce = MagicMock()
+        sns = MagicMock()
+
+        def client_factory(service, **kwargs):
+            return {"ce": ce, "sns": sns}[service]
+
+        mock_boto_client.side_effect = client_factory
+
+        ce.get_cost_and_usage.return_value = {
+            "ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": "1.00", "Unit": "USD"}}}]
+        }
+
+        res = handler({}, {})
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["status"], "BREACH")
+
+        enforcement_log_table.put_item.assert_called()
+        item = enforcement_log_table.put_item.call_args.kwargs["Item"]
+        self.assertEqual(item["status"], "SKIPPED")
+        self.assertEqual(item["reason"], "enforcement disabled")
