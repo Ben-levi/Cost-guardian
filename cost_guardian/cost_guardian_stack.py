@@ -67,6 +67,8 @@ class CostGuardianStack(Stack):
             timeout=Duration.seconds(90),
             log_retention=logs.RetentionDays.TWO_YEARS,
             environment={
+                "ALERT_COOLDOWN_MINUTES": "240",
+                "ALERT_COOLDOWN_KEY": "last_breach_alert",
                 "TABLE_NAME": state_table.table_name,
                 "COST_HISTORY_TABLE": history_table.table_name,
                 "ENFORCEMENT_LOG_TABLE": enforcement_log_table.table_name,
