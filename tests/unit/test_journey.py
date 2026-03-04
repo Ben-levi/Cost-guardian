@@ -6,8 +6,13 @@ from unittest.mock import MagicMock, patch
 from botocore.exceptions import ClientError
 
 
-def _ce_resp(amount: str, unit: str = "USD", metric: str = "UnblendedCost",
-            day_start: str = "2026-02-09", day_end: str = "2026-02-10"):
+def _ce_resp(
+    amount: str,
+    unit: str = "USD",
+    metric: str = "UnblendedCost",
+    day_start: str = "2026-02-09",
+    day_end: str = "2026-02-10",
+):
     return {
         "ResultsByTime": [
             {
@@ -53,6 +58,10 @@ class TestJourneyPendingAlertFlow(unittest.TestCase):
 
             # pending behavior (optional, but explicit is clearer)
             "PENDING_ALERT_KEY": "alert_pending",
+
+            # cooldown defaults (explicit so tests are stable)
+            "ALERT_COOLDOWN_MINUTES": "240",
+            "ALERT_COOLDOWN_KEY": "last_breach_alert",
         },
         clear=False,
     )
@@ -98,19 +107,30 @@ class TestJourneyPendingAlertFlow(unittest.TestCase):
         state_table.put_item.return_value = {"ResponseMetadata": {"HTTPStatusCode": 200}}
         state_table.delete_item.return_value = {"ResponseMetadata": {"HTTPStatusCode": 200}}
 
-        # ---- Pending reads across runs ----
-        # Run #1 start: no pending
-        # Run #2 start: pending exists and matches topic
+        # ---- Pending reads across runs (now includes cooldown key reads) ----
         pending_item = {
             "key": os.environ["PENDING_ALERT_KEY"],
             "topic_arn": os.environ["ALERTS_TOPIC_ARN"],
             "subject": "CostGuardian BREACH",
             "message": "pending message body",
         }
-        state_table.get_item.side_effect = [
-            {},  # run 1 pending check
-            {"Item": pending_item},  # run 2 pending check
-        ]
+
+        # Simulate state that persists across the two handler calls
+        state = {
+            "pending_exists": False,
+            "cooldown_epoch": None,  # not needed for this journey; return empty
+        }
+
+        def get_item_side_effect(Key):
+            k = Key["key"]
+            if k == os.environ["PENDING_ALERT_KEY"]:
+                return {"Item": pending_item} if state["pending_exists"] else {}
+            if k == os.environ.get("ALERT_COOLDOWN_KEY", "last_breach_alert"):
+                # No cooldown item present for this journey test
+                return {}
+            return {}
+
+        state_table.get_item.side_effect = get_item_side_effect
 
         # ---- Cost Explorer is called twice per run (daily + monthly rollup) ----
         # Run #1 daily: 0.50 (BREACH)
@@ -137,14 +157,16 @@ class TestJourneyPendingAlertFlow(unittest.TestCase):
         self.assertTrue(res1["ok"])
         self.assertEqual(res1["status"], "BREACH")
 
+        # pending should have been stored by handler on SNS failure
+        state["pending_exists"] = True
+
         # ---- Run #2 ----
         res2 = handler({}, {})
         self.assertTrue(res2["ok"])
         self.assertEqual(res2["status"], "OK")
 
-        # ensure pending was cleared
-        state_table.delete_item.assert_called_once()
-        state_table.delete_item.assert_called_with(Key={"key": os.environ["PENDING_ALERT_KEY"]})
+        # ensure pending was cleared (cooldown may add additional delete_item calls)
+        state_table.delete_item.assert_any_call(Key={"key": os.environ["PENDING_ALERT_KEY"]})
 
 
 if __name__ == "__main__":

@@ -11,6 +11,10 @@ def _utc_now():
     return datetime.now(timezone.utc)
 
 
+def _epoch_now() -> int:
+    return int(_utc_now().timestamp())
+
+
 def _today_utc_date():
     return _utc_now().date().isoformat()
 
@@ -140,7 +144,12 @@ def handler(event, context):
     pending_alert_key = os.environ.get("PENDING_ALERT_KEY", "alert_pending")
     pending_alert_ttl_days = int(os.environ.get("PENDING_ALERT_TTL_DAYS", "7"))
 
-    # Enforcement config (now includes ENFORCEMENT_ARMED)
+    # NEW: cooldown config
+    alert_cooldown_minutes = int(os.environ.get("ALERT_COOLDOWN_MINUTES", "240"))
+    alert_cooldown_key = os.environ.get("ALERT_COOLDOWN_KEY", "last_breach_alert")
+    alert_cooldown_seconds = max(0, alert_cooldown_minutes) * 60
+
+    # Enforcement config (includes ENFORCEMENT_ARMED)
     (
         enforcement_enabled,
         enforcement_dry_run,
@@ -205,6 +214,7 @@ def handler(event, context):
         "metric": metric,
         "enable_daily_pk": enable_daily_pk,
         "enable_monthly_rollup": enable_monthly_rollup,
+        "alert_cooldown_minutes": alert_cooldown_minutes,
         "enforcement_enabled": enforcement_enabled,
         "enforcement_dry_run": enforcement_dry_run,
         "enforcement_armed": enforcement_armed,
@@ -223,6 +233,13 @@ def handler(event, context):
 
         cost = float(amount_str)
         status = "OK" if cost < threshold else "BREACH"
+
+        # If we're OK, clear breach cooldown marker so next BREACH alerts immediately (best-effort)
+        if status == "OK":
+            try:
+                state_table.delete_item(Key={"key": alert_cooldown_key})
+            except (ClientError, BotoCoreError) as e:
+                print(json.dumps({"msg": "cooldown clear failed (ignored)", "error": str(e)}))
 
         cost_d = _d(cost)
         threshold_d = _d(threshold)
@@ -391,33 +408,66 @@ def handler(event, context):
             subject = "CostGuardian BREACH"
             message = breach_line + enforcement_block
 
-            # 4a) BREACH alert (pending-retry on failure)
-            try:
-                sns.publish(
-                    TopicArn=alerts_topic_arn,
-                    Subject=subject,
-                    Message=message,
-                )
-                print(json.dumps({"msg": "sns alert published"}))
-            except (ClientError, BotoCoreError) as e:
-                pending_ttl = _ttl_epoch(pending_alert_ttl_days)
-                pending_item = {
-                    "key": pending_alert_key,
-                    "topic_arn": alerts_topic_arn,
-                    "subject": subject,
-                    "message": message,
-                    "date": today,
-                    "ts": ts,
-                    "minute_ts": minute_ts,
-                    "ttl": pending_ttl,
-                    "status": "PENDING",
-                    "reason": str(e),
-                }
+            # ---- BREACH alert cooldown ----
+            allow_alert = True
+            if alert_cooldown_seconds > 0:
                 try:
-                    state_table.put_item(Item=pending_item)
-                    print(json.dumps({"msg": "sns alert failed; stored pending retry"}))
-                except (ClientError, BotoCoreError) as ee:
-                    print(json.dumps({"msg": "failed to store pending alert (ignored)", "error": str(ee)}))
+                    last = state_table.get_item(Key={"key": alert_cooldown_key}).get("Item")
+                    last_epoch = int(last.get("last_alert_epoch", 0)) if last else 0
+                    now_epoch = _epoch_now()
+                    if last_epoch and (now_epoch - last_epoch) < alert_cooldown_seconds:
+                        allow_alert = False
+                        remaining = alert_cooldown_seconds - (now_epoch - last_epoch)
+                        print(json.dumps({
+                            "msg": "breach alert suppressed by cooldown",
+                            "cooldown_seconds": alert_cooldown_seconds,
+                            "seconds_remaining": max(0, remaining),
+                        }))
+                except (ClientError, BotoCoreError, ValueError, TypeError) as e:
+                    # Fail open: if we can't read cooldown state, we still alert
+                    print(json.dumps({"msg": "cooldown check failed (fail-open)", "error": str(e)}))
+
+            if allow_alert:
+                # 4a) BREACH alert (pending-retry on failure)
+                try:
+                    sns.publish(
+                        TopicArn=alerts_topic_arn,
+                        Subject=subject,
+                        Message=message,
+                    )
+                    print(json.dumps({"msg": "sns alert published"}))
+
+                    # Record last breach alert time (for cooldown)
+                    try:
+                        state_table.put_item(Item={
+                            "key": alert_cooldown_key,
+                            "last_alert_epoch": _epoch_now(),
+                            "date": today,
+                            "ts": ts,
+                            "minute_ts": minute_ts,
+                        })
+                    except (ClientError, BotoCoreError) as e:
+                        print(json.dumps({"msg": "cooldown write failed (ignored)", "error": str(e)}))
+
+                except (ClientError, BotoCoreError) as e:
+                    pending_ttl = _ttl_epoch(pending_alert_ttl_days)
+                    pending_item = {
+                        "key": pending_alert_key,
+                        "topic_arn": alerts_topic_arn,
+                        "subject": subject,
+                        "message": message,
+                        "date": today,
+                        "ts": ts,
+                        "minute_ts": minute_ts,
+                        "ttl": pending_ttl,
+                        "status": "PENDING",
+                        "reason": str(e),
+                    }
+                    try:
+                        state_table.put_item(Item=pending_item)
+                        print(json.dumps({"msg": "sns alert failed; stored pending retry"}))
+                    except (ClientError, BotoCoreError) as ee:
+                        print(json.dumps({"msg": "failed to store pending alert (ignored)", "error": str(ee)}))
 
         return {
             "ok": True,

@@ -169,9 +169,7 @@ class TestErrorProbing(unittest.TestCase):
             return {"ce": ce, "sns": sns}[service]
 
         mock_boto_client.side_effect = client_factory
-        ce.get_cost_and_usage.side_effect = EndpointConnectionError(
-            endpoint_url="https://ce.us-east-1.amazonaws.com"
-        )
+        ce.get_cost_and_usage.side_effect = EndpointConnectionError(endpoint_url="https://ce.us-east-1.amazonaws.com")
 
         with self.assertRaises(EndpointConnectionError):
             handler({}, {})
@@ -367,7 +365,8 @@ class TestPendingRetryAndPartialWrites(unittest.TestCase):
         self.assertEqual(res["status"], "OK")
 
         sns.publish.assert_called()
-        state_table.delete_item.assert_called_with(Key={"key": "alert_pending"})
+        # cooldown may add extra delete_item calls; ensure pending is cleared
+        state_table.delete_item.assert_any_call(Key={"key": "alert_pending"})
 
     @patch.dict(
         os.environ,
@@ -541,6 +540,7 @@ class TestEnforcement(unittest.TestCase):
             "ENABLE_MONTHLY_ROLLUP": "true",
             "ENFORCEMENT_ENABLED": "true",
             "ENFORCEMENT_DRY_RUN": "false",
+            "ENFORCEMENT_ARMED": "true",  # IMPORTANT: must be armed to stop
             "ENFORCEMENT_TAG_KEY": "CostControl",
             "ENFORCEMENT_TAG_VALUE": "StopOnBreach",
             "ENFORCEMENT_REGIONS": "us-east-1",
@@ -580,9 +580,7 @@ class TestEnforcement(unittest.TestCase):
 
         history_table.put_item.return_value = None
 
-        ec2.describe_instances.return_value = {
-            "Reservations": [{"Instances": [{"InstanceId": "i-1"}]}]
-        }
+        ec2.describe_instances.return_value = {"Reservations": [{"Instances": [{"InstanceId": "i-1"}]}]}
 
         res = handler({}, {})
         self.assertTrue(res["ok"])
@@ -641,9 +639,7 @@ class TestThresholdLowBreach(unittest.TestCase):
         self.assertIn("CostGuardian BREACH", subjects)
 
         pending_writes = [
-            c.kwargs.get("Item", {}).get("key")
-            for c in state_table.put_item.call_args_list
-            if "Item" in c.kwargs
+            c.kwargs.get("Item", {}).get("key") for c in state_table.put_item.call_args_list if "Item" in c.kwargs
         ]
         self.assertNotIn("alert_pending", pending_writes)
 
@@ -697,7 +693,9 @@ class TestOperationalSimulations(unittest.TestCase):
 
         res = handler({}, {})
         self.assertTrue(res["ok"])
-        state_table.delete_item.assert_not_called()
+        # cooldown may delete last_breach_alert on OK; ensure pending not deleted
+        calls = [c.kwargs.get("Key") for c in state_table.delete_item.call_args_list]
+        self.assertNotIn({"key": "alert_pending"}, calls)
 
     @patch.dict(
         os.environ,
@@ -747,7 +745,9 @@ class TestOperationalSimulations(unittest.TestCase):
         res = handler({}, {})
         self.assertTrue(res["ok"])
         sns.publish.assert_not_called()
-        state_table.delete_item.assert_not_called()
+        # cooldown may delete last_breach_alert on OK; ensure pending not deleted
+        calls = [c.kwargs.get("Key") for c in state_table.delete_item.call_args_list]
+        self.assertNotIn({"key": "alert_pending"}, calls)
 
     @patch.dict(
         os.environ,
@@ -842,7 +842,8 @@ class TestOperationalSimulations(unittest.TestCase):
         res = handler({}, {})
         self.assertTrue(res["ok"])
         sns.publish.assert_called()
-        state_table.delete_item.assert_called_with(Key={"key": "alert_pending"})
+        # cooldown may add extra delete_item calls; ensure pending cleared
+        state_table.delete_item.assert_any_call(Key={"key": "alert_pending"})
 
     # ✅ NEW: CE failure means no writes (even with pending present)
     @patch.dict(
