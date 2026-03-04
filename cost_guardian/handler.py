@@ -130,6 +130,18 @@ def _enforce_stop_instances(tag_key: str, tag_value: str, regions: list[str], dr
     return summary
 
 
+def _write_enforcement_audit(enforcement_log_table, item: dict):
+    """
+    Best-effort audit write. Must never fail the Lambda run.
+    """
+    if enforcement_log_table is None:
+        return
+    try:
+        enforcement_log_table.put_item(Item=item)
+    except (ClientError, BotoCoreError) as e:
+        print(json.dumps({"msg": "enforcement audit write failed (ignored)", "error": str(e)}))
+
+
 def handler(event, context):
     # Runtime config (read at runtime so tests can patch os.environ)
     threshold = float(os.environ.get("THRESHOLD", "0.10"))
@@ -144,7 +156,7 @@ def handler(event, context):
     pending_alert_key = os.environ.get("PENDING_ALERT_KEY", "alert_pending")
     pending_alert_ttl_days = int(os.environ.get("PENDING_ALERT_TTL_DAYS", "7"))
 
-    # NEW: cooldown config
+    # Cooldown config
     alert_cooldown_minutes = int(os.environ.get("ALERT_COOLDOWN_MINUTES", "240"))
     alert_cooldown_key = os.environ.get("ALERT_COOLDOWN_KEY", "last_breach_alert")
     alert_cooldown_seconds = max(0, alert_cooldown_minutes) * 60
@@ -167,12 +179,15 @@ def handler(event, context):
     cost_history_table_name = os.environ["COST_HISTORY_TABLE"]
     alerts_topic_arn = os.environ["ALERTS_TOPIC_ARN"]
 
+    enforcement_log_table_name = os.environ.get("ENFORCEMENT_LOG_TABLE", "").strip()
+
     dynamodb = boto3.resource("dynamodb")
     ce = boto3.client("ce")
     sns = boto3.client("sns")
 
     state_table = dynamodb.Table(table_name)
     history_table = dynamodb.Table(cost_history_table_name)
+    enforcement_log_table = dynamodb.Table(enforcement_log_table_name) if enforcement_log_table_name else None
 
     # ---- 0) Retry pending alert (best effort; never fail run) ----
     try:
@@ -257,7 +272,7 @@ def handler(event, context):
             "threshold": threshold_d,
             "status": status,
             "ttl": ttl,
-            "mode": granularity,  # helpful for later debugging
+            "mode": granularity,
         }
 
         def put_history_idempotent(item: dict):
@@ -286,7 +301,6 @@ def handler(event, context):
                 print(json.dumps({"msg": "history write failed (daily; ignored)", "error": str(e)}))
 
         # ---- 2b) Monthly rollup (best effort) ----
-        # If we are already in MONTHLY mode, reuse the fetched MTD cost (no extra CE call).
         if enable_monthly_rollup:
             month_key = _month_key_from_iso_day(today)
             month_start = _month_start_from_iso_day(today)
@@ -349,7 +363,6 @@ def handler(event, context):
 
         # ---- 4) BREACH flows ----
         if status == "BREACH":
-            # Build ONE combined email body: breach + enforcement result
             if granularity == "MONTHLY":
                 breach_line = (
                     f"[CostGuardian] BREACH (MONTHLY MTD): mtd_cost={cost:.4f} {unit} "
@@ -362,48 +375,86 @@ def handler(event, context):
                 )
 
             enforcement_block = ""
-            # Enforcement best-effort (does NOT send separate email)
-            if enforcement_enabled:
-                if not enforcement_tag_key or not enforcement_tag_value:
+            enforcement_result = None
+            audit_status = None
+            audit_reason = None
+
+            # Enforcement (and audit) decision tree
+            if not enforcement_enabled:
+                audit_status = "SKIPPED"
+                audit_reason = "enforcement disabled"
+            elif not enforcement_tag_key or not enforcement_tag_value:
+                audit_status = "SKIPPED"
+                audit_reason = "missing tag"
+                enforcement_block = (
+                    "\n\nENFORCEMENT: enabled but tag key/value missing -> skipped.\n"
+                    "Set ENFORCEMENT_TAG_KEY and ENFORCEMENT_TAG_VALUE."
+                )
+            elif not enforcement_regions:
+                audit_status = "SKIPPED"
+                audit_reason = "no regions"
+                enforcement_block = "\n\nENFORCEMENT: enabled but no regions configured -> skipped."
+            else:
+                if (not enforcement_dry_run) and (not enforcement_armed):
+                    audit_status = "SKIPPED"
+                    audit_reason = "not armed"
+                    print(json.dumps({"msg": "enforcement not armed; skipping stop"}))
                     enforcement_block = (
-                        "\n\nENFORCEMENT: enabled but tag key/value missing -> skipped.\n"
-                        "Set ENFORCEMENT_TAG_KEY and ENFORCEMENT_TAG_VALUE."
+                        "\n\nENFORCEMENT: NOT ARMED -> skip stop.\n"
+                        "Set ENFORCEMENT_ARMED=true only when you're sure."
                     )
-                elif not enforcement_regions:
-                    enforcement_block = "\n\nENFORCEMENT: enabled but no regions configured -> skipped."
                 else:
-                    # ---- Safety latch ----
-                    # - Dry-run: allowed regardless of armed flag (discover + log only)
-                    # - Not dry-run: requires ENFORCEMENT_ARMED=true
-                    if (not enforcement_dry_run) and (not enforcement_armed):
-                        print(json.dumps({"msg": "enforcement not armed; skipping stop"}))
-                        enforcement_block = (
-                            "\n\nENFORCEMENT: NOT ARMED -> skip stop.\n"
-                            "Set ENFORCEMENT_ARMED=true only when you're sure."
+                    try:
+                        enforcement_result = _enforce_stop_instances(
+                            tag_key=enforcement_tag_key,
+                            tag_value=enforcement_tag_value,
+                            regions=enforcement_regions,
+                            dry_run=enforcement_dry_run,
                         )
-                    else:
-                        try:
-                            result = _enforce_stop_instances(
-                                tag_key=enforcement_tag_key,
-                                tag_value=enforcement_tag_value,
-                                regions=enforcement_regions,
-                                dry_run=enforcement_dry_run,
-                            )
-                            print(json.dumps({"msg": "enforcement result", "result": result}))
+                        print(json.dumps({"msg": "enforcement result", "result": enforcement_result}))
 
-                            mode = "DRY_RUN" if enforcement_dry_run else "STOPPED"
-                            enforcement_block = (
-                                f"\n\nENFORCEMENT {mode}:\n"
-                                f"- Armed: {enforcement_armed}\n"
-                                f"- Tag filter: {enforcement_tag_key}={enforcement_tag_value}\n"
-                                f"- Regions: {', '.join(enforcement_regions)}\n"
-                                f"- Matched: {result.get('total_matched', 0)}\n"
-                                f"- Stopped: {result.get('total_stopped', 0)}\n"
-                                f"- Details: {json.dumps(result.get('regions', {}))}"
-                            )
+                        if enforcement_dry_run:
+                            audit_status = "DRY_RUN"
+                        else:
+                            audit_status = "STOPPED"
 
-                        except (ClientError, BotoCoreError, ValueError, TypeError) as e:
-                            enforcement_block = f"\n\nENFORCEMENT: failed (ignored): {str(e)}"
+                        mode = "DRY_RUN" if enforcement_dry_run else "STOPPED"
+                        enforcement_block = (
+                            f"\n\nENFORCEMENT {mode}:\n"
+                            f"- Armed: {enforcement_armed}\n"
+                            f"- Tag filter: {enforcement_tag_key}={enforcement_tag_value}\n"
+                            f"- Regions: {', '.join(enforcement_regions)}\n"
+                            f"- Matched: {enforcement_result.get('total_matched', 0)}\n"
+                            f"- Stopped: {enforcement_result.get('total_stopped', 0)}\n"
+                            f"- Details: {json.dumps(enforcement_result.get('regions', {}))}"
+                        )
+                    except (ClientError, BotoCoreError, ValueError, TypeError) as e:
+                        audit_status = "ERROR"
+                        audit_reason = str(e)
+                        enforcement_block = f"\n\nENFORCEMENT: failed (ignored): {str(e)}"
+
+            # Write audit trail if ENFORCEMENT_LOG_TABLE is configured
+            audit_item = {
+                "pk": f"ENFORCEMENT#{today}",
+                "sk": f"TS#{ts}",
+                "date": today,
+                "ts": ts,
+                "minute_ts": minute_ts,
+                "mode": granularity,
+                "threshold": _d(threshold),
+                "cost": _d(cost),
+                "unit": unit,
+                "status": audit_status or "SKIPPED",
+                "reason": audit_reason or "",
+                "enabled": bool(enforcement_enabled),
+                "dry_run": bool(enforcement_dry_run),
+                "armed": bool(enforcement_armed),
+                "tag_key": enforcement_tag_key or "",
+                "tag_value": enforcement_tag_value or "",
+                "regions": enforcement_regions,
+                "result": enforcement_result or {},
+            }
+            _write_enforcement_audit(enforcement_log_table, audit_item)
 
             subject = "CostGuardian BREACH"
             message = breach_line + enforcement_block
@@ -424,11 +475,9 @@ def handler(event, context):
                             "seconds_remaining": max(0, remaining),
                         }))
                 except (ClientError, BotoCoreError, ValueError, TypeError) as e:
-                    # Fail open: if we can't read cooldown state, we still alert
                     print(json.dumps({"msg": "cooldown check failed (fail-open)", "error": str(e)}))
 
             if allow_alert:
-                # 4a) BREACH alert (pending-retry on failure)
                 try:
                     sns.publish(
                         TopicArn=alerts_topic_arn,

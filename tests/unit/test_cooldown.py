@@ -3,8 +3,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timezone
 
-from cost_guardian import handler as h
-
+import cost_guardian.handler as h
 
 def ce_response(amount: str):
     return {"ResultsByTime": [{"Total": {"UnblendedCost": {"Amount": amount, "Unit": "USD"}}}]}
