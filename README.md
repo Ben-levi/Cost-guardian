@@ -1,7 +1,6 @@
 <p align="center">
   <img src="Image.png" alt="CostGuardian Architecture Icon Palette and Macro Commands Reference" width="100%">
 </p>
-
 ## Project Overview
 ... (rest of your content)
 # CostGuardian!
