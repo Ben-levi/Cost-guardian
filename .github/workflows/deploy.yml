@@ -15,6 +15,7 @@ jobs:
   test_and_synth:
     name: Tests + CDK Synth
     runs-on: ubuntu-latest
+    environment: prod
 
     steps:
       - name: Checkout
@@ -79,11 +80,20 @@ jobs:
       - name: Install CDK CLI
         run: npm i -g aws-cdk@2
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Debug GitHub context
+        run: |
+          echo "event_name=${{ github.event_name }}"
+          echo "ref=${{ github.ref }}"
+          echo "repository=${{ github.repository }}"
+          echo "workflow=${{ github.workflow }}"
+          echo "job=${{ github.job }}"
+
+      - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: us-east-1
+          audience: sts.amazonaws.com
 
       - name: CDK Deploy (manual approval gated by environment)
         run: |

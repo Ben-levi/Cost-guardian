@@ -45,3 +45,7 @@ out.json
 key.json
 eav.json
 eav_today.json
+correct-trust-policy.json
+current-trust-policy.json
+lambda-env.json
+trust-policy.json
