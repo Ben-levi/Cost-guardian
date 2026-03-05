@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="image.png" alt="CostGuardian Architecture Reference" width="80%">
+  <img src="image.png" alt="CostGuardian Architecture Icon Palette and Macro Commands Reference" width="100%">
 </p>
 
 ## Project Overview
