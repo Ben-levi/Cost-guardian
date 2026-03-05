@@ -1,4 +1,5 @@
-# CostGuardian
+# CostGuardian![Uploading Gemini_Generated_Image_l6dhnpl6dhnpl6dh.png…]()
+
 
 CostGuardian is a serverless AWS cost-monitoring tool that queries AWS Cost Explorer on a schedule, records cost history in DynamoDB, and sends alerts via SNS when spend exceeds a configured threshold. Optionally, it can **enforce** cost controls by stopping tagged EC2 instances (with safety switches like *dry-run* and *armed* mode).
 
