@@ -3,7 +3,7 @@ Redshift enforcement: pause clusters matching a tag.
 """
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
-from .base import AbstractEnforcer, EnforcementResult
+from cost_guardian.enforcement.base import AbstractEnforcer, EnforcementResult
 
 
 class RedshiftEnforcer(AbstractEnforcer):

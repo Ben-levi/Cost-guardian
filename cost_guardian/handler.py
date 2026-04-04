@@ -10,17 +10,17 @@ from typing import Optional
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
-from .config import (
+from cost_guardian.config import (
     CostExplorerConfig,
     AlertConfig,
     EnforcementConfig,
     NotificationConfig,
     DynamoDBConfig,
 )
-from .logging_utils import structured_log, log_info, log_error, log_enforcement
-from .enforcement import EnforcementOrchestrator
-from .notifications import NotificationDispatcher
-from .notifications.sns_notifier import SNSNotifier
+from cost_guardian.logging_utils import structured_log, log_info, log_error, log_enforcement
+from cost_guardian.enforcement import EnforcementOrchestrator
+from cost_guardian.notifications import NotificationDispatcher
+from cost_guardian.notifications.sns_notifier import SNSNotifier
 
 
 # --- Utility functions (kept from original) ---

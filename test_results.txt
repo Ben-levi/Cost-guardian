@@ -1,0 +1,100 @@
+============================= test session starts =============================
+platform win32 -- Python 3.14.0, pytest-8.4.2, pluggy-1.6.0 -- C:\Users\ся\Desktop\cost-guardian\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\ся\Desktop\cost-guardian
+plugins: typeguard-2.13.3
+collecting ... collected 72 items
+
+tests/unit/test_config.py::TestEnvTruthy::test_default_false PASSED      [  1%]
+tests/unit/test_config.py::TestEnvTruthy::test_default_true PASSED       [  2%]
+tests/unit/test_config.py::TestEnvTruthy::test_falsy_false_string PASSED [  4%]
+tests/unit/test_config.py::TestEnvTruthy::test_truthy_1 PASSED           [  5%]
+tests/unit/test_config.py::TestEnvTruthy::test_truthy_true_string PASSED [  6%]
+tests/unit/test_config.py::TestEnvTruthy::test_truthy_yes PASSED         [  8%]
+tests/unit/test_config.py::TestParseRegions::test_parse_multiple_regions PASSED [  9%]
+tests/unit/test_config.py::TestParseRegions::test_parse_regions_aws_region_fallback PASSED [ 11%]
+tests/unit/test_config.py::TestParseRegions::test_parse_regions_empty PASSED [ 12%]
+tests/unit/test_config.py::TestParseRegions::test_parse_regions_with_whitespace PASSED [ 13%]
+tests/unit/test_config.py::TestParseRegions::test_parse_single_region PASSED [ 15%]
+tests/unit/test_config.py::TestParseEnforcementServices::test_parse_multiple_services PASSED [ 16%]
+tests/unit/test_config.py::TestParseEnforcementServices::test_parse_services_default_ec2 PASSED [ 18%]
+tests/unit/test_config.py::TestParseEnforcementServices::test_parse_single_service PASSED [ 19%]
+tests/unit/test_config.py::TestGetEnvOrSSM::test_resolves_ssm_when_starts_with_slash PASSED [ 20%]
+tests/unit/test_config.py::TestGetEnvOrSSM::test_returns_default_when_missing PASSED [ 22%]
+tests/unit/test_config.py::TestGetEnvOrSSM::test_returns_env_var PASSED  [ 23%]
+tests/unit/test_config.py::TestCostExplorerConfig::test_from_env PASSED  [ 25%]
+tests/unit/test_config.py::TestCostExplorerConfig::test_from_env_defaults PASSED [ 26%]
+tests/unit/test_config.py::TestEnforcementConfig::test_from_env PASSED   [ 27%]
+tests/unit/test_config.py::TestEnforcementConfig::test_from_env_defaults PASSED [ 29%]
+tests/unit/test_config.py::TestNotificationConfig::test_from_env PASSED  [ 30%]
+tests/unit/test_config.py::TestNotificationConfig::test_from_env_defaults FAILED [ 31%]
+tests/unit/test_config.py::TestDynamoDBConfig::test_from_env PASSED      [ 33%]
+tests/unit/test_config.py::TestDynamoDBConfig::test_from_env_optional_tables PASSED [ 34%]
+tests/unit/test_logging_utils.py::TestCorrelationIDManager::test_get_or_create_generates_new_id PASSED [ 36%]
+tests/unit/test_logging_utils.py::TestCorrelationIDManager::test_get_or_create_returns_same_id PASSED [ 37%]
+tests/unit/test_logging_utils.py::TestCorrelationIDManager::test_reset PASSED [ 38%]
+tests/unit/test_logging_utils.py::TestCorrelationIDManager::test_set_and_get PASSED [ 40%]
+tests/unit/test_logging_utils.py::TestStructuredLog::test_log_enforcement PASSED [ 41%]
+tests/unit/test_logging_utils.py::TestStructuredLog::test_log_enforcement_with_error PASSED [ 43%]
+tests/unit/test_logging_utils.py::TestStructuredLog::test_log_error_with_error PASSED [ 44%]
+tests/unit/test_logging_utils.py::TestStructuredLog::test_log_info PASSED [ 45%]
+tests/unit/test_logging_utils.py::TestStructuredLog::test_log_warn PASSED [ 47%]
+tests/unit/test_logging_utils.py::TestStructuredLog::test_structured_log_default_level PASSED [ 48%]
+tests/unit/test_logging_utils.py::TestStructuredLog::test_structured_log_with_correlation_id PASSED [ 50%]
+tests/unit/test_logging_utils.py::TestStructuredLog::test_structured_log_with_extra_fields PASSED [ 51%]
+tests/unit/test_logging_utils.py::TestStructuredLog::test_structured_log_with_level PASSED [ 52%]
+tests/unit/test_enforcers.py::TestEnforcementResult::test_enforcement_result_creation PASSED [ 54%]
+tests/unit/test_enforcers.py::TestEnforcementResult::test_enforcement_result_with_error FAILED [ 55%]
+tests/unit/test_enforcers.py::TestEnforcementOrchestrator::test_enforce_all_multiple_services PASSED [ 56%]
+tests/unit/test_enforcers.py::TestEnforcementOrchestrator::test_enforce_all_single_service PASSED [ 58%]
+tests/unit/test_enforcers.py::TestEnforcementOrchestrator::test_enforce_all_unknown_service_skipped PASSED [ 59%]
+tests/unit/test_enforcers.py::TestEnforcementOrchestrator::test_get_nonexistent_enforcer PASSED [ 61%]
+tests/unit/test_enforcers.py::TestEnforcementOrchestrator::test_orchestrator_registers_builtin_enforcers PASSED [ 62%]
+tests/unit/test_enforcers.py::TestEnforcementOrchestrator::test_register_custom_enforcer PASSED [ 63%]
+tests/unit/test_enforcers.py::TestEC2Enforcer::test_ec2_enforcer_actual_stop PASSED [ 65%]
+tests/unit/test_enforcers.py::TestEC2Enforcer::test_ec2_enforcer_dry_run PASSED [ 66%]
+tests/unit/test_enforcers.py::TestEC2Enforcer::test_ec2_enforcer_handles_client_error PASSED [ 68%]
+tests/unit/test_enforcers.py::TestEC2Enforcer::test_ec2_enforcer_service_name PASSED [ 69%]
+tests/unit/test_enforcers.py::TestRDSEnforcer::test_rds_enforcer_dry_run PASSED [ 70%]
+tests/unit/test_enforcers.py::TestRDSEnforcer::test_rds_enforcer_service_name PASSED [ 72%]
+tests/unit/test_enforcers.py::TestECSEnforcer::test_ecs_enforcer_service_name PASSED [ 73%]
+tests/unit/test_enforcers.py::TestSageMakerEnforcer::test_sagemaker_enforcer_service_name PASSED [ 75%]
+tests/unit/test_enforcers.py::TestRedshiftEnforcer::test_redshift_enforcer_service_name PASSED [ 76%]
+tests/unit/test_enforcers.py::TestLambdaEnforcer::test_lambda_enforcer_dry_run PASSED [ 77%]
+tests/unit/test_enforcers.py::TestLambdaEnforcer::test_lambda_enforcer_service_name PASSED [ 79%]
+tests/unit/test_notifications.py::TestNotificationResult::test_notification_result_failure PASSED [ 80%]
+tests/unit/test_notifications.py::TestNotificationResult::test_notification_result_success PASSED [ 81%]
+tests/unit/test_notifications.py::TestAbstractNotifier::test_cannot_instantiate_abstract PASSED [ 83%]
+tests/unit/test_notifications.py::TestAbstractNotifier::test_concrete_implementation PASSED [ 84%]
+tests/unit/test_notifications.py::TestSNSNotifier::test_sns_notifier_channel_name PASSED [ 86%]
+tests/unit/test_notifications.py::TestSNSNotifier::test_sns_notifier_send_failure PASSED [ 87%]
+tests/unit/test_notifications.py::TestSNSNotifier::test_sns_notifier_send_success PASSED [ 88%]
+tests/unit/test_notifications.py::TestSNSNotifier::test_sns_notifier_send_with_metadata PASSED [ 90%]
+tests/unit/test_notifications.py::TestNotificationDispatcher::test_dispatcher_get_nonexistent_notifier PASSED [ 91%]
+tests/unit/test_notifications.py::TestNotificationDispatcher::test_dispatcher_register_notifier PASSED [ 93%]
+tests/unit/test_notifications.py::TestNotificationDispatcher::test_dispatcher_send_all_empty PASSED [ 94%]
+tests/unit/test_notifications.py::TestNotificationDispatcher::test_dispatcher_send_all_handles_exceptions PASSED [ 95%]
+tests/unit/test_notifications.py::TestNotificationDispatcher::test_dispatcher_send_all_multiple_channels PASSED [ 97%]
+tests/unit/test_notifications.py::TestNotificationDispatcher::test_dispatcher_send_all_single_channel PASSED [ 98%]
+tests/unit/test_notifications.py::TestNotificationDispatcher::test_dispatcher_send_all_with_sns FAILED [100%]
+
+================================== FAILURES ===================================
+________________ TestNotificationConfig.test_from_env_defaults ________________
+tests\unit\test_config.py:215: in test_from_env_defaults
+    self.assertIsNone(config.slack_webhook)
+E   AssertionError: '' is not None
+__________ TestEnforcementResult.test_enforcement_result_with_error ___________
+tests\unit\test_enforcers.py:39: in test_enforcement_result_with_error
+    self.assertIsNone(result.error)  # error param is not set in default __post_init__
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: 'Access Denied' is not None
+________ TestNotificationDispatcher.test_dispatcher_send_all_with_sns _________
+tests\unit\test_notifications.py:197: in test_dispatcher_send_all_with_sns
+    self.assertEqual(len(results), 0)  # sns not in channels list by default
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: 1 != 0
+=========================== short test summary info ===========================
+FAILED tests/unit/test_config.py::TestNotificationConfig::test_from_env_defaults
+FAILED tests/unit/test_enforcers.py::TestEnforcementResult::test_enforcement_result_with_error
+FAILED tests/unit/test_notifications.py::TestNotificationDispatcher::test_dispatcher_send_all_with_sns
+======================== 3 failed, 69 passed in 0.90s =========================

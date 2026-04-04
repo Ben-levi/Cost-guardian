@@ -3,7 +3,7 @@ Lambda enforcement: set reserved concurrent executions to 0 on functions matchin
 """
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
-from .base import AbstractEnforcer, EnforcementResult
+from cost_guardian.enforcement.base import AbstractEnforcer, EnforcementResult
 
 
 class LambdaEnforcer(AbstractEnforcer):

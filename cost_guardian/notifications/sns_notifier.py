@@ -4,7 +4,7 @@ SNS Topic notification channel.
 from typing import Dict, Optional, Any
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
-from .base import AbstractNotifier, NotificationResult
+from cost_guardian.notifications.base import AbstractNotifier, NotificationResult
 
 
 class SNSNotifier(AbstractNotifier):

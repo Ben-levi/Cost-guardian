@@ -2,9 +2,9 @@
 Notification dispatcher: coordinates multiple notification channels.
 """
 from typing import Dict, List, Optional
-from .base import AbstractNotifier, NotificationResult
-from .sns_notifier import SNSNotifier
-from ..config import NotificationConfig
+from cost_guardian.notifications.base import AbstractNotifier, NotificationResult
+from cost_guardian.notifications.sns_notifier import SNSNotifier
+from cost_guardian.config import NotificationConfig
 
 
 class NotificationDispatcher:

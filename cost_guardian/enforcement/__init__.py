@@ -2,7 +2,7 @@
 Enforcement orchestrator: coordinates multiple enforcement plugins.
 """
 from typing import Dict, List, Optional
-from .base import AbstractEnforcer, EnforcementResult
+from cost_guardian.enforcement.base import AbstractEnforcer, EnforcementResult
 
 
 class EnforcementOrchestrator:
@@ -15,12 +15,12 @@ class EnforcementOrchestrator:
 
     def _register_builtin_enforcers(self) -> None:
         """Register built-in enforcers."""
-        from .ec2 import EC2Enforcer
-        from .rds import RDSEnforcer
-        from .ecs import ECSEnforcer
-        from .sagemaker import SageMakerEnforcer
-        from .redshift import RedshiftEnforcer
-        from .lambda_enforcer import LambdaEnforcer
+        from cost_guardian.enforcement.ec2 import EC2Enforcer
+        from cost_guardian.enforcement.rds import RDSEnforcer
+        from cost_guardian.enforcement.ecs import ECSEnforcer
+        from cost_guardian.enforcement.sagemaker import SageMakerEnforcer
+        from cost_guardian.enforcement.redshift import RedshiftEnforcer
+        from cost_guardian.enforcement.lambda_enforcer import LambdaEnforcer
 
         for enforcer_class in [EC2Enforcer, RDSEnforcer, ECSEnforcer, SageMakerEnforcer, RedshiftEnforcer, LambdaEnforcer]:
             enforcer = enforcer_class()
